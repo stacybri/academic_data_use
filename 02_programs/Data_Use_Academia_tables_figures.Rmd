@@ -1,0 +1,1852 @@
+---
+title: "Replication package for Missing Evidence: Tracking Academic Data Use around the World"
+author: Brian Stacy, Lucas Kitzmuller, Daniel Mahler, Umar Serajuddin, and Xiaoyu Wang
+date: "`r Sys.Date()`"
+output:
+  word_document: 
+    number_sections: true
+bibliography: bibliography.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	fig.height = 6,
+	fig.width = 9,
+	message = FALSE,
+	warning = FALSE,
+	dpi = 350,
+	fig.path="./figures/"
+)
+library(tidyverse)
+library(flextable)
+library(here)
+library(wbstats)
+library(dtplyr)
+library(data.table)
+library(caret)
+library(ggrepel)
+library(ggpmisc)
+library(ggthemes)
+library(ggtext)
+library(broom)
+library(estimatr)
+library(sandwich)
+library(lmtest)
+library(zoo)
+library(jsonlite)
+library(modelsummary)
+library(patchwork)
+library(fst)
+library(aws.s3)
+library(fixest)
+library(GGally)
+
+set.seed(354623)
+
+#set paths
+dir <- here()
+raw_data <- paste0(dir, "/01_raw_data/")
+output <- paste0(dir, "/03_output/")
+s3_output <- 'https://data-use-academia.s3.amazonaws.com/03_output/'#for the bigger files kept on S3
+#article share
+#share of articles that have been examined.  Will be used to estimate total number by country
+article_share=11/100
+
+#set lower year for papers
+paper_lower_year <- 2017
+
+prim_col <- "#219ebc"
+maj_col <- "#023047"
+min_col <- "#8ecae6"
+```
+
+
+
+
+
+
+```{r countryscore, include=FALSE}
+
+#read in world bank country metadata
+country_metadata <- wb_countries() %>%
+  filter(region!="Aggregates")
+
+
+#read in data containing classified set of articles
+#file is saved as .fst format for faster reading
+tictoc::tic("fst")
+articles_year_df <- s3read_using(read.fst,object='s3://data-use-academia/03_output/results_completed_updated_20231003.fst') %>%
+  as.data.table()
+tictoc::toc()
+
+
+#read in indicators from the WDI for regression analysis
+correlates_df <- read_csv(paste0(raw_data, "/correlates_df.csv"))
+
+#get a list of the columns names in the file
+countries_list <- colnames(articles_year_df[,27:263])
+
+#get number of articles by country. Both using data and not using data
+articles_year_country_df <- articles_year_df[,lapply(.SD, sum, na.rm=TRUE), by=year, .SDcols=countries_list]
+
+#reshape the file long
+articles_year_country_df <- articles_year_country_df %>% 
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='papers'
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) %>%
+  mutate(papers_estimate=papers/article_share,
+         papers_estimate_3yr=rollmean(papers_estimate, k=3, align='left', fill=NA))
+
+
+#get number of articles using data by country
+articles_data_use_year_df <- articles_year_df[data_use=="Yes",lapply(.SD, sum, na.rm=TRUE), by=year, .SDcols=countries_list]
+
+#pivot longer
+articles_data_use_year_df <- articles_data_use_year_df %>% 
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='data_papers'
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) %>%  
+  mutate(data_papers_estimate=data_papers/article_share,
+         data_papers_estimate_3yr=rollmean(data_papers_estimate, k=3, align='left', fill=NA),
+         data_papers_3yr=rollmean(data_papers, k=3, align='left', fill=NA))
+
+
+#drop medical articles
+#get number of articles using data by country
+articles_data_use_year_restrict_df <- articles_year_df[data_use=="Yes" & group_name!='Medicine',lapply(.SD, sum, na.rm=TRUE), by=year, .SDcols=countries_list]
+
+#pivot longer
+articles_data_use_year_restrict_df <- articles_data_use_year_restrict_df %>% 
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='data_papers_nomed'
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) %>%  
+  mutate(data_papers_nomed_estimate=data_papers_nomed/article_share,
+         data_papers_nomed_estimate_3yr=rollmean(data_papers_nomed_estimate, k=3, align='left', fill=NA),
+         data_papers_nomed_3yr=rollmean(data_papers_nomed, k=3, align='left', fill=NA))
+
+
+#get number of articles using data by country and subject
+articles_data_use_year_subject_df <- articles_year_df[data_use=="Yes",lapply(.SD, sum, na.rm=TRUE), by=c('year','group_name'), .SDcols=countries_list]
+
+#pivot longer
+articles_data_use_year_subject_df <- articles_data_use_year_subject_df %>% 
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='data_papers'
+  ) %>%
+  group_by(iso3c, group_name) %>%
+  arrange(desc(year)) %>%
+  mutate(
+    data_papers_3yr=rollmean(data_papers, k=3, align='left', fill=NA)
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) %>%
+  pivot_wider(
+    names_from=group_name,
+    values_from=c('data_papers','data_papers_3yr'),
+    names_glue="{.value}_{group_name}"
+  )
+
+
+#combine the total number of papers under different specificiations into one file
+country_scores_annual_df <- articles_year_country_df %>%
+  left_join(articles_data_use_year_df)  %>%
+  left_join(articles_data_use_year_restrict_df) %>%
+  left_join(articles_data_use_year_subject_df) %>%
+  filter(!is.na(country)) %>%
+  rename(date=year) %>%
+  select(-country) %>%
+  left_join(correlates_df) 
+
+#export annual numbers of articles using data
+write_excel_csv(country_scores_annual_df, here(output, "data_use_country_scores_annual.csv"))
+
+
+#get numbers just for 2019
+country_scores_2019_df <- country_scores_annual_df %>%
+  filter(date==2019)
+
+# get numbers across all years
+country_scores_aggregate_df <- country_scores_annual_df %>%
+  group_by(iso3c, region, income_level, lending_type) %>%
+  summarise(papers=sum(papers, na.rm=T),
+            papers_estimate=sum(papers_estimate, na.rm=T),
+            data_papers=sum(data_papers, na.rm=T),
+            data_papers_estimate=sum(data_papers_estimate, na.rm=T),
+            data_papers_nomed=sum(data_papers_nomed, na.rm=T),
+            data_papers_nomed_estimate=sum(data_papers_nomed_estimate, na.rm=T),
+            data_papers_Medicine=sum(data_papers_Medicine, na.rm=T),
+            data_papers_Business=sum(data_papers_Business, na.rm=T),
+            data_papers_Economics=sum(data_papers_Economics, na.rm=T),
+            data_papers_Psychology=sum(data_papers_Psychology, na.rm=T),
+            data_papers_Sociology =sum(data_papers_Sociology, na.rm=T), 
+            data_papers_Political_Science=sum(`data_papers_Political Science`, na.rm=T),
+            qual_papers=papers-data_papers) %>%
+  mutate(date=2020) %>%
+  left_join(correlates_df) %>%
+  ungroup() %>%
+  mutate(data_papers_pcap=1000000*data_papers/SP.POP.TOTL) %>%
+  select(country, iso3c, date, region, income_level, lending_type, everything())
+  
+
+#get numbers in a recent window
+country_scores_recent_df <- country_scores_annual_df %>%
+  filter(between(date,paper_lower_year, 2019)) %>%
+  group_by(iso3c, region, income_level, lending_type) %>%
+  summarise(papers=sum(papers, na.rm=T),
+            papers_estimate=sum(papers_estimate, na.rm=T),
+            data_papers=sum(data_papers, na.rm=T),
+            data_papers_estimate=sum(data_papers_estimate, na.rm=T),
+            data_papers_nomed=sum(data_papers_nomed, na.rm=T),
+            data_papers_nomed_estimate=sum(data_papers_nomed_estimate, na.rm=T),
+            data_papers_Medicine=sum(data_papers_Medicine, na.rm=T),
+            data_papers_Business=sum(data_papers_Business, na.rm=T),
+            data_papers_Economics=sum(data_papers_Economics, na.rm=T),
+            data_papers_Psychology=sum(data_papers_Psychology, na.rm=T),
+            data_papers_Sociology =sum(data_papers_Sociology, na.rm=T), 
+            data_papers_Political_Science=sum(`data_papers_Political Science`, na.rm=T),
+            qual_papers=papers-data_papers) %>%
+  mutate(date=2019) %>%
+  left_join(correlates_df) %>%
+  ungroup() %>%
+  mutate(data_papers_pcap=1000000*data_papers/SP.POP.TOTL) %>%
+  select(country, iso3c, date, region, income_level, lending_type, everything())
+
+
+
+```
+
+```{r mturkdata, include=FALSE}
+
+# #read in country scores based on collapsing articles in mturk
+# #This file was produced in the classifications_compare.ipynb in the 02_programs/misc file.
+
+#read in articles in the training set
+training_df <- read_csv(paste0(raw_data,"/train_doc_wcounts.csv")) %>%
+  rename(paper_id=id) %>%
+  distinct(paper_id, text, .keep_all=TRUE) %>%
+  as.data.table()
+
+testing_df <- read_csv(paste0(raw_data,"/test_doc_wcounts.csv")) %>%
+  rename(paper_id=id) %>%
+  distinct(paper_id, text, .keep_all=TRUE) %>%
+  as.data.table()
+
+
+############
+# read in all mturk articles
+mturk_articles_df <- read_csv(paste0(output,'/mturk_article_classifications.csv')) %>%
+  as.data.table() %>%
+  distinct(paper_id, .keep_all=TRUE) %>%
+  left_join(articles_year_df[,.(paper_id, data_use)] ) %>%
+  left_join(training_df) %>%
+  filter(!is.na(paper_id)) %>%
+  filter(!is.na(data_use)) %>%
+  filter(is.na(data_type)) %>% #drop those in train set of articles
+  as.data.table()
+
+#drop the training set from conmparison
+
+
+
+
+countries_list <- colnames(mturk_articles_df[,19:156])
+#get number of articles by country using mturk classifier
+mturk_year_country_df <- mturk_articles_df[data_use_mturk==1,lapply(.SD, sum, na.rm=TRUE), by=year, .SDcols=countries_list]
+
+mturk_year_country_df <- mturk_year_country_df %>% 
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='data_use_mturk_papers'
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) 
+
+
+#get number of articles by country
+class_year_country_df <- mturk_articles_df[data_use=="Yes",lapply(.SD, sum, na.rm=TRUE), by=year, .SDcols=countries_list]
+
+class_year_country_df <- class_year_country_df %>% 
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='data_use_class_papers'
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) 
+
+#put in one file
+mturk_articles_year_df <- mturk_year_country_df %>%
+  left_join(class_year_country_df)
+
+
+country_score_mturk_df <- mturk_articles_year_df %>%
+  group_by(country, iso3c, region_iso3c, region, admin_region, income_level, lending_type) %>%
+  summarise(data_use_mturk_papers=sum(data_use_mturk_papers),
+            data_use_class_papers=sum(data_use_class_papers, na.rm=T))
+
+
+gc()
+
+```
+
+
+```{r programs}
+
+#add equations to plots
+eq_plot_txt <- function(data, inp, var) {
+  eq <- lm_robust(inp ~ var, data=data, se_type='HC2')
+  coef <- round(coef(eq),2)
+  std_err <- round(sqrt(diag(vcov(eq))),2)
+  r_2<- round(summary(eq)$r.squared,2)
+  sprintf(" y = %.2f + %.2f x, R<sup>2</sup> = %.2f <br> (%.2f) <span style='color:white'> %s</span> (%.2f) ", coef[1], coef[2], r_2[1], std_err[1],"s", std_err[2])
+  
+}
+
+eq_plot_log_txt <- function(data, inp, var) {
+  eq <- lm_robust(inp ~ var, data=data, se_type='HC2')
+  coef <- round(coef(eq),1)
+  std_err <- round(sqrt(diag(vcov(eq))),1)
+  r_2<- round(summary(eq)$r.squared,2)
+  sprintf(" log(y) = %.2f + %.2f x, R<sup>2</sup> = %.2f <br> <span style='color:white'> %s </span> (%.2f) <span style='color:white'> %s </span> (%.2f) ", coef[1], coef[2], r_2[1], "Ss",std_err[1],"|", std_err[2])
+  
+}
+
+eq_plot_txt_precise <- function(data, inp, var) {
+  eq <- lm_robust(inp ~ var, data=data, se_type='HC2')
+  coef <- round(coef(eq),1)
+  std_err <- round(sqrt(diag(vcov(eq))),1)
+  r_2<- round(summary(eq)$r.squared,3)
+  sprintf(" y = %.1f + %.1f x, R<sup>2</sup> = %.3f <br> (%.1f) <span style='color:white'> %s</span> (%.1f) ", coef[1], coef[2], r_2[1], std_err[1],"s", std_err[2])
+}
+
+#modelsummary output
+gm <- tibble::tribble(
+  ~raw,        ~clean,          ~fmt,
+  "nobs",      "N",             0,
+  "r.squared", "R Sq.", 2)
+
+
+
+
+# define stle for ggplot based on BBC plotting styles
+bbc_style <- function() {
+  font <- "Helvetica"
+  
+  ggplot2::theme(
+    
+    #Text format:
+    #This sets the font, size, type and colour of text for the chart's title
+    plot.title = ggplot2::element_text(family=font,
+                                       size=24,
+                                       face="bold",
+                                       color="#222222"),
+    #This sets the font, size, type and colour of text for the chart's subtitle, as well as setting a margin between the title and the subtitle
+    plot.subtitle = ggplot2::element_text(family=font,
+                                          size=20,
+                                          margin=ggplot2::margin(9,0,9,0)),
+    #plot.caption = ggplot2::element_blank(),
+    #This leaves the caption text element empty, because it is set elsewhere in the finalise plot function
+    
+    #Legend format
+    #This sets the position and alignment of the legend, removes a title and backround for it and sets the requirements for any text within the legend. The legend may often need some more manual tweaking when it comes to its exact position based on the plot coordinates.
+    legend.position = "top",
+    legend.text.align = 0,
+    legend.background = ggplot2::element_blank(),
+    legend.title = ggplot2::element_blank(),
+    legend.key = ggplot2::element_blank(),
+    legend.text = ggplot2::element_text(family=font,
+                                        size=14,
+                                        color="#222222"),
+    
+    #Axis format
+    #This sets the text font, size and colour for the axis test, as well as setting the margins and removes lines and ticks. In some cases, axis lines and axis ticks are things we would want to have in the chart - the cookbook shows examples of how to do so.
+    axis.title = ggplot2::element_text(family=font,
+                                      size=12,
+                                      color="#222222"),
+    axis.text = ggplot2::element_text(family=font,
+                                      size=12,
+                                      color="#222222"),
+    axis.text.x = ggplot2::element_text(margin=ggplot2::margin(5, b = 10)),
+    axis.ticks = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    
+    #Grid lines
+    #This removes all minor gridlines and adds major y gridlines. In many cases you will want to change this to remove y gridlines and add x gridlines. The cookbook shows you examples for doing so
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major.x = ggplot2::element_line(color="#cbcbcb"),
+    panel.grid.major.y = ggplot2::element_blank(),
+    
+    #Blank background
+    #This sets the panel background as blank, removing the standard grey ggplot background colour from the plot
+    panel.background = ggplot2::element_blank(),
+    
+    #Strip background (#This sets the panel background for facet-wrapped plots to white, removing the standard grey ggplot background colour and sets the title size of the facet-wrap title to font size 22)
+    strip.background = ggplot2::element_rect(fill="white"),
+    strip.text = ggplot2::element_text(size  = 22,  hjust = 0)
+  )
+}
+
+```
+
+```{r mapper}
+
+#For mapping the result
+# quality = "high"
+# maps <- wbgmaps::wbgmaps[[quality]]
+#load world bank map data
+load(paste0(raw_data, '/misc/maps.Rdata'))
+standard_crop_wintri <- function() {
+  l <- list(
+    left=-12000000, right=16396891,
+    top=9400000, bottom=-6500000
+  )
+  l$xlim <- c(l$left, l$right)
+  l$ylim <- c(l$bottom, l$top)
+  l
+}
+
+
+
+spi_mapper  <- function(data, indicator, title) {
+  
+ indicator<-indicator
+
+  map_df <- get(data) %>%
+    filter(date==max(date, na.rm=T)) %>%
+    filter(!(country %in% c('Greenland'))) %>% #drop a few countries for which we do not collect data.
+    group_by( country) %>%
+    #summarise(across(!! indicator,last)) %>%
+  rename(n_papers=!! indicator) %>%
+  mutate(n_papers=if_else(is.na(n_papers), as.numeric(NA), as.numeric(n_papers)))    %>%
+  filter(region!="Aggregates")  %>%
+  right_join(country_metadata)%>%
+  mutate(n_papers=if_else(is.na(n_papers), as.numeric(NA), as.numeric(n_papers))) 
+ 
+  
+  
+   p1 <- ggplot() +
+    geom_map(data = map_df, aes(map_id = iso3c, fill = n_papers), map = maps$countries) + 
+    geom_polygon(data = maps$disputed, aes(long, lat, group = group, map_id = id), fill = "grey80") + 
+    geom_polygon(data = maps$lakes, aes(long, lat, group = group), fill = "white")  +
+     geom_path(data = maps$boundaries,
+               aes(long, lat, group = group),
+               color = "white",
+               size = 0.3,
+               lineend = maps$boundaries$lineend,
+              linetype = maps$boundaries$linetype) +
+    scale_x_continuous(expand = c(0, 0), limits = standard_crop_wintri()$xlim) +
+    scale_y_continuous(expand = c(0, 0), limits = standard_crop_wintri()$ylim) +
+    scale_fill_distiller(palette = "RdYlGn",
+                       direction=1,
+                       na.value='grey',
+                       trans="log10")  +
+    coord_equal() +
+    theme_map(base_size=12) +
+    labs(
+      title=str_wrap(title,100),
+      caption = 'Source: SPI',
+      fill='Papers'
+    )
+  
+
+  print(p1)
+
+}
+
+spi_mapper_quintile  <- function(data, indicator, title) {
+  
+ indicator<-indicator
+
+  map_df <- get(data) %>%
+    filter(date==max(date, na.rm=T)) %>%
+    filter(!(country %in% c('Greenland'))) %>% #drop a few countries for which we do not collect data.
+    group_by( country) %>%
+    
+    #summarise(across(!! indicator,last)) %>%
+  rename(n_papers=!! indicator) %>%
+  mutate(n_papers=if_else(is.na(n_papers), as.numeric(NA), as.numeric(n_papers)))    %>%
+  filter(region!="Aggregates")  %>%
+  right_join(country_metadata)%>%
+  mutate(n_papers=if_else(is.na(n_papers), as.numeric(NA), as.numeric(n_papers))) 
+
+  
+  spi_groups_quantiles <- quantile(map_df$n_papers, probs=c(1,2,3,4)/5,na.rm=T)
+  
+  SPI_map <- map_df %>%
+    mutate(spi_groups=case_when(
+      between(n_papers, spi_groups_quantiles[4],max(map_df$n_papers, na.rm = TRUE)) ~ "Top Quintile",
+      between(n_papers, spi_groups_quantiles[3],spi_groups_quantiles[4]) ~ "4th Quintile",
+      between(n_papers, spi_groups_quantiles[2],spi_groups_quantiles[3]) ~ "3rd Quintile",
+      between(n_papers, spi_groups_quantiles[1],spi_groups_quantiles[2]) ~ "2nd Quintile",
+      between(n_papers, min(map_df$n_papers, na.rm=TRUE),spi_groups_quantiles[1]) ~ "Bottom 20%"
+      
+    )) %>%
+    mutate(spi_groups=factor(spi_groups, 
+                             levels=c("Top Quintile","4th Quintile","3rd Quintile","2nd Quintile","Bottom 20%" )))  
+  
+  #set color pallete
+  col_pal <- c("#2ec4b6","#acece7","#f1dc76","#ffbf69","#ff9f1c")  
+  names(col_pal) <- c("Top Quintile","4th Quintile","3rd Quintile","2nd Quintile","Bottom 20%" ) 
+  
+  
+p1<-ggplot() +
+  geom_map(data = SPI_map, aes(map_id = iso3c, fill = spi_groups), map = maps$countries) + 
+  geom_polygon(data = maps$disputed, aes(long, lat, group = group, map_id = id), fill = "grey80") + 
+  geom_polygon(data = maps$lakes, aes(long, lat, group = group), fill = "white")  +
+  geom_path(data = maps$boundaries,
+            aes(long, lat, group = group),
+            color = "white",
+            size = 0.3,
+            lineend = maps$boundaries$lineend,
+            linetype = maps$boundaries$linetype) +
+  scale_x_continuous(expand = c(0, 0), limits = standard_crop_wintri()$xlim) +
+  scale_y_continuous(expand = c(0, 0), limits = standard_crop_wintri()$ylim) +
+  scale_fill_manual(
+    name='SPI Score',
+    values=col_pal,
+    na.value='grey'
+  ) +
+  coord_equal() +
+  theme_map(base_size=12) +
+  labs(
+    caption = 'Source: World Bank. Statistical Performance Indicators'
+  )
+print(p1)
+
+}
+
+```
+
+
+
+# Main Tables and Figures
+
+## Table 1. Summary Statistics of Article Corpus. 2000-2020 
+
+
+```{r}
+sumstats_tab <- articles_year_df %>%
+  transmute(
+    `Year of Publication`=year,
+    `Published in Journal (1=yes)`=as.numeric(journal==""),
+    Field=group_name,
+    `Data Use (1=yes)`=as.numeric(data_use=="Yes"),
+    `Country Identified (1=yes)`=if_else(nf==1,0,1)
+  ) %>%
+  group_by(Field) %>%
+  summarise(across(c('Published in Journal (1=yes)','Data Use (1=yes)','Country Identified (1=yes)'),~round(mean(.),2)),
+            Articles=n()) %>%
+  ungroup() %>%
+  mutate(`Share of Articles`=100*round(Articles/sum(Articles),3)) %>%
+  as_tibble()
+  
+sumstats_tab %>%
+  flextable() %>%
+  autofit()
+```
+
+
+## Figure 1. Comparison of Human Classifications of Data Use to NLP Predictions
+
+
+```{r}
+mturk_cor <- cor(country_score_mturk_df$data_use_class_papers, country_score_mturk_df$data_use_mturk_papers)
+
+reg_df <- country_scores_recent_df %>% filter(data_papers_estimate>0)
+
+
+
+```
+
+
+
+```{r}
+
+p1 <- ggplot(country_score_mturk_df, aes(x=data_use_class_papers, y=data_use_mturk_papers)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 2, y = 100,label = eq_plot_txt_precise(country_score_mturk_df, data_use_mturk_papers, data_use_class_papers), hjust=0.2)
+  ) +
+  geom_abline(slope=1) +
+ scale_x_log10(labels=scales::comma) +
+  scale_y_log10(labels=scales::comma) +
+  geom_text_repel(aes(label=country)) +
+  ylab("Mturk Classification") +
+  xlab("Machine Learning Classification") +
+  bbc_style()
+
+p1
+
+#lm(data_use_mturk_papers ~ data_use_class_papers, data=country_score_mturk_df) %>% summary()
+
+```
+
+## Figure 2. Article Examples
+
+![Article Example - No Data Use](./article_example_no_data.png)
+
+
+
+![Article Example - Data Use](./article_example_data.png)
+
+
+## Figure 3. Number of Articles using Data by Country (2000-2020)
+
+```{r}
+nf_df <- articles_year_df %>%
+  filter(nf==1) %>%
+  as_tibble()
+
+nf_stat <- nrow(articles_year_df)-nrow(nf_df)
+```
+
+
+```{r}
+spi_mapper('country_scores_aggregate_df', 'data_papers', '')
+```
+
+
+
+## Figure 4. Number of Articles Using Data by Income Group and Region
+
+By Income Group
+
+```{r}
+
+pop_income_df <- correlates_df %>%
+  left_join(country_metadata) %>%
+  filter(date==2020) %>%
+  group_by(income_level) %>%
+  summarise(pop=sum(SP.POP.TOTL, na.rm=T)) %>%
+  ungroup() %>%
+  mutate(share=pop/sum(pop))
+
+country_scores_aggregate_df %>%
+  group_by(income_level) %>%
+  summarise(data_papers=sum(data_papers)) %>%
+  ungroup() %>%
+  mutate(share=data_papers/sum(data_papers)) %>%
+  filter(income_level!="Not classified") %>%
+  mutate(income_level=factor(income_level, levels=c( "Low income", "Lower middle income", "Upper middle income","High income"))) %>%
+  ggplot( aes(y=data_papers, x=income_level, group=income_level)) +
+    geom_col(fill=min_col) +
+    geom_text(aes(label=scales::comma(data_papers)), hjust=-0.1) +
+    ylab('Number of Papers using Data') +
+    xlab("") +
+    scale_y_continuous(label=scales::comma) +
+    bbc_style() +
+    coord_flip() +
+    expand_limits(y=c(0,90000))
+```
+
+
+
+By region per million persons
+
+```{r}
+
+plt_df <- country_scores_aggregate_df %>%
+  left_join(correlates_df) %>%
+  group_by(region) %>%
+  summarise(data_papers=sum(data_papers),
+            pop=sum(SP.POP.TOTL, na.rm=T)) %>%
+  mutate(data_papers_pcap=10000000*data_papers/pop) %>%
+  ungroup() %>%
+  arrange(data_papers_pcap)
+
+plt_df <- plt_df %>%
+  mutate(region=factor(region, levels=unique(plt_df$region)))
+
+
+  ggplot(plt_df, aes(y=data_papers_pcap, x=region, group=region)) +
+    geom_col(fill=prim_col) +
+    geom_text(aes(label=scales::comma(data_papers_pcap)), hjust=-0.1) +
+    ylab('Number of Papers using Data per capita') +
+    xlab("") +
+    scale_y_continuous(label=scales::comma) +
+    bbc_style() +
+    coord_flip() +
+    expand_limits(y=c(0,500))
+```
+
+
+## Figure 5. Relationship between Papers using Data and Development Outcomes
+
+```{r, fig.width=8, fig.height=12}
+
+reg_df_fixedn <- reg_df %>%
+  filter(!(is.na(NY.GDP.PCAP.PP.KD) | is.na(SP.POP.TOTL) | is.na(SPI.INDEX))) 
+
+p1 <- ggplot(reg_df_fixedn, aes(y=data_papers, x=NY.GDP.PCAP.PP.KD)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+  scale_x_log10(labels=scales::comma) +
+  scale_y_log10(labels=scales::comma) +
+  xlab("GDP per capita, PPP (constant 2017 international $)") +
+  ylab('Number of Papers using Data') +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 40000, y = 30,label = eq_plot_txt(reg_df_fixedn, log(data_papers),log(NY.GDP.PCAP.PP.KD))), hjust=0.2, size=4
+  ) +
+  bbc_style() 
+
+
+p2 <- ggplot(reg_df_fixedn, aes(y=data_papers, x=SP.POP.TOTL)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+  scale_x_log10(labels=scales::comma) +
+  scale_y_log10(labels=scales::comma) +
+  xlab("Population, Total") +
+  ylab('Number of Papers using Data') +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 50000000, y = 30,label = eq_plot_txt(reg_df_fixedn, log(data_papers),log(SP.POP.TOTL))), hjust=0.2, size=4
+  ) +
+  bbc_style() 
+
+p3 <- ggplot(reg_df_fixedn, aes(y=data_papers, x=SPI.INDEX)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+  scale_y_log10(labels=scales::comma) +
+  xlab("SPI Overall Score") +
+  ylab('Number of Papers using Data') +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 40, y = 20,label = eq_plot_txt(reg_df_fixedn, log(data_papers),SPI.INDEX)), hjust=0.2, size=4
+  ) +
+  bbc_style() 
+
+
+p4 <- ggplot(reg_df, aes(y=data_papers, x=IQ.SPI.PIL4)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+  scale_y_log10(labels=scales::comma) +
+  xlab("SPI Overall Score") +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 40, y = 20,label = eq_plot_txt(reg_df, log(data_papers),IQ.SPI.PIL4)), hjust=0.2, size=4
+  ) +
+  bbc_style() +
+  theme(
+    axis.title.y = element_blank()
+  )
+
+```
+
+GDP per capita
+
+```{r, fig.width=9, fig.height=5}
+
+p1
+
+```
+
+Population
+
+```{r, fig.width=9, fig.height=5}
+p2
+
+```
+
+SPI Overall Score
+
+```{r, fig.width=9, fig.height=5}
+p3
+```
+
+
+## Table 2. Relationships between Number of Papers Using Data and Statistical Performance
+
+```{r}
+
+
+
+models <- list(
+
+  '(1)'=feols(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn, se='hetero'),
+  '(2)'=feols(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn, se='hetero'),
+  '(3)'=feols(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn, se='hetero'),
+  '(4)'=feols(log(data_papers) ~   SPI.INDEX.PIL4  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn, se='hetero')
+  )
+
+modelsummary(models,
+             estimate= "{estimate}{stars}",
+             coef_rename = c("SPI.INDEX" = "SPI Overall Score",
+                             "SPI.INDEX.PIL1" = "SPI Data Use Score",
+                             "SPI.INDEX.PIL2" = "SPI Data Services Score",
+                             "SPI.INDEX.PIL3" = "SPI Data Products Score",
+                             "SPI.INDEX.PIL4" = "SPI Data Sources Score",
+                             "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
+                             "log(NY.GDP.MKTP.PP.KD)" = "Log GDP",
+                             "log(NY.GDP.PCAP.PP.KD)" = "Log GDP per capita",
+                             "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
+                             "log(qual_papers+1)" = "Log Number of Qualitative Papers",
+                             "region"="Region",
+                             "log(SP.POP.TOTL)"="Log Population",
+                             "log(poverty_surveys)" = 'Log # of Poverty Surveys',
+                             "SG.LAW.INDX" = "Women Business and the Law Index Score (scale 1-100)",
+                             "gii"="Gender Inequality Index",
+                             "sigi"="Social Institutions and Gender Index",
+                             "NV.IND.MANF.ZS"  = "Manufacturing value added (% of GDP)",
+                              "NV.AGR.TOTL.ZS"= "Agriculture, forestry, fishing value added (% of GDP)",
+                              "BN.CAB.XOKA.GD.ZS"= "Current account balance (% of GDP)",
+                              "HD.HCI.OVRL" = "Human Capital Index (0-1 scale)",
+                              "SE.PRM.ENRR" = "School Enrollment, Primary (% gross)" ,
+                             "SE.TER.ENRR" = "School Enrollment, Tertiary (% gross)" ,
+                              "NE.TRD.GNFS.ZS" = "Trade (% of GDP)",
+                              "WGI.OVL" = "WGI Index",
+                              "CC.EST" = "WGI: Control of Corruption: Estimate",
+                              "GE.EST" = "WGI: Governance Effectiveness: Estimate",
+                              "PV.EST" = "WGI: Political Stability and Absence of Violence/Terrorism: Estimate",
+                              "RQ.EST" = "WGI: Regulatory Quality: Estimate",
+                              "RL.EST" = "WGI: Rule of Law: Estimate",
+                              "VA.EST" = "WGI: Voice and Accountability: Estimate"
+                             ),
+             notes="Data from the World Bank's World Development Indicators (WDI) and SPI.  WDI series codes include NY.GDP.PCAP.PP.KD, SP.POP.TOTL, IQ.SPI.OVRL,IQ.SPI.PIL1,IQ.SPI.PIL2, IQ.SPI.PIL3, IQ.SPI.PIL4, IQ.SPI.PIL5.  Papers include all papers using data years 2000-2020.
+              ***=0.001 level
+              **=0.01 level
+              *=0.05 level
+              +=0.1 level",
+             escape = FALSE,
+             fmt = 2,
+             output='flextable'
+             )
+
+```
+
+## Figure 6. Relationship between Number of Papers Using Data and Data Sources 
+
+```{r}
+
+reg_df_fixedn <- reg_df_fixedn %>%
+  mutate(
+    Pop.Cen=as.numeric(SPI.D4.1.1.POPU==1),
+    Ag.Cen=as.numeric(SPI.D4.1.2.AGRI==1),
+    Bizz.Cen=as.numeric(SPI.D4.1.3.BIZZ==1),
+    House.Svy=as.numeric(SPI.D4.1.4.HOUS>=0.5),
+    Ag.Svy=as.numeric(SPI.D4.1.5.AGSVY>=0.5),
+    Labr.Svy=as.numeric(SPI.D4.1.6.LABR>=0.5),
+    Hlth.Svy=as.numeric(SPI.D4.1.7.HLTH>=0.5),
+    Bizz.Svy=as.numeric(SPI.D4.1.8.BZSVY>=0.5),
+    CRVS=as.numeric(SPI.D4.2.3.CRVS==1)
+  )
+
+source_models <- list(
+  '(1)'=lm_robust(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + Pop.Cen   , data=reg_df_fixedn),
+  '(2)'=lm_robust(log(data_papers) ~ Ag.Cen + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
+  '(3)'=lm_robust(log(data_papers) ~ Bizz.Cen +  log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
+  '(4)'=lm_robust(log(data_papers) ~  House.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn),
+  '(5)'=lm_robust(log(data_papers) ~  Ag.Svy + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
+  '(6)'=lm_robust(log(data_papers) ~  Labr.Svy + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
+  '(7)'=lm_robust(log(data_papers) ~ Hlth.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
+  '(8)'=lm_robust(log(data_papers) ~  Bizz.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
+  '(9)'=lm_robust(log(data_papers) ~  CRVS  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
+  '(10)'=lm_robust(log(data_papers) ~ SPI.D4.3.GEO.first.admin.level + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn) 
+  )
+
+
+
+modelplot(source_models,
+          coef_map= c("SPI.INDEX" = "SPI Overall Score",
+                             "SPI.INDEX.PIL1" = "SPI Data Use Score",
+                             "SPI.INDEX.PIL2" = "SPI Data Services Score",
+                             "SPI.INDEX.PIL3" = "SPI Data Products Score",
+                             "SPI.INDEX.PIL4" = "SPI Data Sources Score",
+                             "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
+
+                             "SPI.D4.1.1.POPU" = "Population Census Score" ,
+                             "SPI.D4.1.2.AGRI" = "Agriculture Census Score",
+                             "SPI.D4.1.3.BIZZ" = "Business Census Score",
+                             "SPI.D4.1.4.HOUS" = "Household Income/Consumption Survey Score",
+                             "SPI.D4.1.5.AGSVY"= "Agriculture Survey Score" , 
+                             "SPI.D4.1.6.LABR" = "Labor Force Survey Score", 
+                             "SPI.D4.1.7.HLTH" = "Health Survey Score", 
+                             "SPI.D4.1.8.BZSVY" = "Business/Establishment Survey Score",
+                             "SPI.D4.2.3.CRVS" = "Complete Civil Registration and Vital Statistics System Score",
+                             
+                             "SPI.D4.3.GEO.first.admin.level"= "Availability of Data at 1st Admin Level (ODIN) Score",
+                             "CRVS" = "Complete Civil Registration and Vital Statistics System",
+                              "Bizz.Svy" = "Business/Establishments: 2 or more in 10 years",
+                             "Hlth.Svy" = "Health Surveys: 2 or more in 10 years", 
+                               "Labr.Svy" = "Labor Force Surveys: 2 or more in 10 years", 
+                               "Ag.Svy"= "Agriculture Surveys: 2 or more in 10 years" , 
+                             "House.Svy" = "Household surveys: 2 or more in 10 years",
+                             "Bizz.Cen" = "Business/Establishment Census in past 10 years",
+                               "Ag.Cen" = "Agriculture Census  in past 10 years",
+                            "Pop.Cen" = "Population Census in past 10 years" ,
+                            "NV.IND.MANF.ZS"  = "Manufacturing value added (% of GDP)",
+                              "NV.AGR.TOTL.ZS"= "Agriculture, forestry, fishing value added (% of GDP)",
+                              "BN.CAB.XOKA.GD.ZS"= "Current account balance (% of GDP)",
+                              "HD.HCI.OVRL" = "Human Capital Index (0-1 scale)",
+                              "SE.PRM.ENRR" = "School Enrollment, Primary (% gross)" ,
+                              "NE.TRD.GNFS.ZS" = "Trade (% of GDP)",
+                              "WGI.OVL" = "WGI Index",
+                              "CC.EST" = "WGI: Control of Corruption: Estimate",
+                              "GE.EST" = "WGI: Governance Effectiveness: Estimate",
+                              "PV.EST" = "WGI: Political Stability and Absence of Violence/Terrorism: Estimate",
+                              "RQ.EST" = "WGI: Regulatory Quality: Estimate",
+                              "RL.EST" = "WGI: Rule of Law: Estimate",
+                              "VA.EST" = "WGI: Voice and Accountability: Estimate"
+                             
+
+                             ),
+          ) +
+  labs(subtitle='Partial regression coefficients conditional on \n log GDP per capita, log population, and the log number of qualitative papers.',
+      caption="Data from the World Bank's World Development Indicators (WDI) and SPI. \n Papers include all papers using data years 2017-2019. \n Confidence Intervals at 95% significance level") +
+  geom_vline(xintercept = 0) +
+  theme(
+    legend.position = 'none'
+  )
+
+# 
+sources_summary <- modelsummary(source_models,
+             estimate= "{estimate}{stars}",
+             coef_rename= c("SPI.INDEX" = "SPI Overall Score",
+                             "SPI.INDEX.PIL1" = "SPI Data Use Score",
+                             "SPI.INDEX.PIL2" = "SPI Data Services Score",
+                             "SPI.INDEX.PIL3" = "SPI Data Products Score",
+                             "SPI.INDEX.PIL4" = "SPI Data Sources Score",
+                             "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
+
+                             "SPI.D4.1.1.POPU" = "Population Census Score" ,
+                             "SPI.D4.1.2.AGRI" = "Agriculture Census Score",
+                             "SPI.D4.1.3.BIZZ" = "Business Census Score",
+                             "SPI.D4.1.4.HOUS" = "Household Income/Consumption Survey Score",
+                             "SPI.D4.1.5.AGSVY"= "Agriculture Survey Score" ,
+                             "SPI.D4.1.6.LABR" = "Labor Force Survey Score",
+                             "SPI.D4.1.7.HLTH" = "Health Survey Score",
+                             "SPI.D4.1.8.BZSVY" = "Business/Establishment Survey Score",
+                             "SPI.D4.2.3.CRVS" = "Complete Civil Registration and Vital Statistics System Score",
+
+                             "Pop.Cen" = "Population Census in past 10 years" ,
+                             "Ag.Cen" = "Agriculture Census  in past 10 years",
+                             "Bizz.Cen" = "Business/Establishment Census in past 10 years",
+                             "House.Svy" = "Household surveys: 2 or more in 10 years",
+                             "Ag.Svy"= "Agriculture Surveys: 2 or more in 10 years" ,
+                             "Labr.Svy" = "Labor Force Surveys: 2 or more in 10 years",
+                             "Hlth.Svy" = "Health Surveys: 2 or more in 10 years",
+                             "Bizz.Svy" = "Business/Establishments: 2 or more in 10 years",
+                             "CRVS" = "Complete Civil Registration and Vital Statistics System",
+                             "SPI.D4.3.GEO.first.admin.level"= "Availability of Data at 1st Admin Level (ODIN) Score",
+
+                             "log(NY.GDP.MKTP.PP.KD)" = "Log GDP",
+                             "log(NY.GDP.PCAP.PP.KD)" = "Log GDP per capita",
+                             "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
+                             "log(qual_papers+1)" = "Log Number of Qualitative Papers",
+                             "region"="Region",
+                             "log(SP.POP.TOTL)"="Log Population",
+                             "log(poverty_surveys)" = 'Log # of Poverty Surveys',
+                             "SG.LAW.INDX" = "Women Business and the Law Index Score (scale 1-100)",
+                             "gii"="Gender Inequality Index",
+                             "sigi"="Social Institutions and Gender Index"
+                             ),
+             notes="Data from the World Bank's World Development Indicators (WDI) and SPI. Papers include all papers using data years 2017-2019.
+              ***=0.001 level
+              **=0.01 level
+              *=0.05 level
+              +=0.1 level",
+             gof_map = gm,
+             escape = FALSE,
+             fmt = 2
+             )
+
+```
+
+
+## Figure 7. Relationship between Data Use and Data Supply
+
+```{r}
+
+# # start with per capita
+data_use_df <- country_scores_annual_df %>%
+  mutate(
+    data_use_pcap=10^6*data_papers/SP.POP.TOTL,
+    data_use_pcap_3yr=10^6*data_papers_3yr/SP.POP.TOTL,
+    data_use_gdp_pcap=10^2*data_papers/NY.GDP.PCAP.PP.KD,
+    data_use_gdp_pcap_3yr=10^2*data_papers_3yr/NY.GDP.PCAP.PP.KD
+  )
+
+
+# Create 3year rolling SPI scores (as papers 3 year rolling)
+country_scores_annual_df <- country_scores_annual_df %>% 
+  group_by(iso3c) %>%
+  arrange(desc(date)) %>%
+  mutate(
+    SPI.INDEX.PIL2_3yr=rollmean(SPI.INDEX.PIL2, k=3, align='left', fill=NA),
+    SPI.INDEX.PIL4_3yr=rollmean(SPI.INDEX.PIL4, k=3, align='left', fill=NA),
+    SPI.INDEX.PIL5_3yr=rollmean(SPI.INDEX.PIL5, k=3, align='left', fill=NA),
+    qual_papers = papers - data_papers,
+    qual_papers_3yr = rollmean(qual_papers, k=3, align='left', fill=NA),
+    NY.GDP.PCAP.PP.KD_3yr= rollmean(NY.GDP.PCAP.PP.KD, k=3, align='left', fill=NA),
+    SP.POP.TOTL_3yr = rollmean(SP.POP.TOTL, k=3, align='left', fill=NA),
+    data_papers_pcap_3yr=10^6*data_papers_3yr/SP.POP.TOTL_3yr
+  ) 
+
+# SPI Pillars 2 (Data Services), 4 (Data Sources), 5 (Data Infrastructure) 
+country_scores_annual_df <- country_scores_annual_df %>%
+  rowwise() %>%
+  mutate(SPI.INDEX.PIL2.4.5 = mean(c(SPI.INDEX.PIL2,SPI.INDEX.PIL4,SPI.INDEX.PIL5),na.rm = T),
+         SPI.INDEX.PIL2.4.5_3yr = mean(c(SPI.INDEX.PIL2_3yr,SPI.INDEX.PIL4_3yr,SPI.INDEX.PIL5_3yr),na.rm = T))
+
+
+#  SPI Pillars 4 (Data Sources), 5 (Data Infrastructure) 
+country_scores_annual_df <- country_scores_annual_df %>%
+  rowwise() %>%
+  mutate(SPI.INDEX.PIL4.5 = mean(c(SPI.INDEX.PIL4,SPI.INDEX.PIL5),na.rm = T),
+         SPI.INDEX.PIL4.5_3yr = mean(c(SPI.INDEX.PIL4_3yr,SPI.INDEX.PIL5_3yr),na.rm = T))
+
+# For plotting only take year 2020, and countries with more than one million pop
+df_plot <- country_scores_annual_df %>%
+  #filter(date <= 2020 & date >= 2018) %>%
+  filter(date == 2019) %>%
+  filter(SP.POP.TOTL>10^6) %>%
+  select(iso3c, date, region, income_level, data_papers_3yr, SPI.INDEX.PIL4.5_3yr,SP.POP.TOTL,NY.GDP.PCAP.PP.KD,
+         SPI.INDEX.PIL2_3yr,SPI.INDEX.PIL4_3yr,SPI.INDEX.PIL5_3yr,SPI.INDEX.PIL2,SPI.INDEX.PIL4,SPI.INDEX.PIL5,
+         NY.GDP.PCAP.PP.KD_3yr, SP.POP.TOTL_3yr,qual_papers_3yr,data_papers_pcap_3yr)
+
+
+# Log data papers population and GDPpc regression adjusted
+mod <- fixest::feols(log(data_papers_3yr)~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr),  data=df_plot)
+df_plot <- df_plot %>%
+  modelr::add_residuals(mod, var='data_use_reg_adjusted_3yr') 
+
+# Log data papers population and GDPpc AND QUALITATIVE PAPERS regression adjusted
+df_plot$qual_papers_3yr_plus1 <- df_plot$qual_papers_3yr + 1 
+mod <- fixest::feols(log(data_papers_3yr)~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr) + log(qual_papers_3yr_plus1),  data=df_plot)
+df_plot <- df_plot %>%
+  modelr::add_residuals(mod, var='data_use_reg_adjusted_3yr_v2') 
+
+#adjust spi pillar 4 for log qualitative papers
+mod <- fixest::feols(SPI.INDEX.PIL4_3yr~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr) + log(qual_papers_3yr_plus1),  data=df_plot)
+df_plot <- df_plot %>%
+  modelr::add_residuals(mod, var='SPI.INDEX.PIL4_3yr_reg_adjusted_3yr_v2') 
+  
+
+
+# Calculate median values
+median_x <- median(df_plot$SPI.INDEX.PIL4_3yr, na.rm = TRUE)
+median_y <- median(df_plot$data_papers_pcap_3yr, na.rm = TRUE)
+median_x_v2 <- median(df_plot$SPI.INDEX.PIL4_3yr_reg_adjusted_3yr_v2, na.rm = TRUE)
+median_y_v2 <- median(df_plot$data_use_reg_adjusted_3yr_v2, na.rm = TRUE)
+
+# Remove outliers
+ df_plot_outl <- df_plot %>%
+   filter(!(iso3c %in% c("LBY", "TKM")))
+
+# For labels 
+min_y <- min(df_plot_outl$data_papers_pcap_3yr, na.rm = T)
+max_y <- max(df_plot_outl$data_papers_pcap_3yr, na.rm = T)
+min_y_v2 <- min(df_plot_outl$data_use_reg_adjusted_3yr_v2, na.rm = T)
+max_y_v2 <- max(df_plot_outl$data_use_reg_adjusted_3yr_v2, na.rm = T)
+min_x <- min(df_plot_outl$SPI.INDEX.PIL4_3yr, na.rm = T)
+max_x <- max(df_plot_outl$SPI.INDEX.PIL4_3yr, na.rm = T)
+min_x_v2 <- min(df_plot_outl$SPI.INDEX.PIL4_3yr_reg_adjusted_3yr_v2, na.rm = T)
+max_x_v2 <- max(df_plot_outl$SPI.INDEX.PIL4_3yr_reg_adjusted_3yr_v2, na.rm = T)
+
+
+
+```
+
+a)Country Scatterplot
+
+```{r}
+
+# GScatter plot - qual papers - income
+ggplot(df_plot, aes(x = SPI.INDEX.PIL4_3yr, y = data_use_reg_adjusted_3yr_v2)) +
+  geom_point(aes(colour = income_level)) +
+  geom_text_repel(aes(label = iso3c)) +
+  geom_vline(xintercept = median_x, linetype="dashed", color = "red") +
+  geom_hline(yintercept = median_y_v2, linetype="dashed", color = "red") +
+  geom_richtext(aes(x = min_x, y = min_y_v2, label = "<b>Deserts: <br>low data supply, <br>little data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(aes(x = max_x, y = (max_y_v2+0.1), label = "<b>Lakes: <br>high data supply, <br>high data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(aes(x = max_x, y = min_y_v2, label = "<b>Swamps: <br>high data supply, <br>little data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(aes(x = min_x, y = (max_y_v2+0.1), label = "<b>Oases: <br>low data supply, <br>high data research</b>"), fill = "lightblue", alpha = 0.8) +
+  scale_x_continuous(expand = expansion(mult = c(0.2, .2))) +
+  scale_y_continuous(expand = expansion(mult = c(0.2, 0.2))) +
+  labs(y = "Regression adjusted # papers using data (avg. 2017-2019)", 
+       x = "SPI Pillar 4 (avg. 2017-2019)",
+       colour = NULL) +
+  guides(colour = guide_legend(nrow = 1, title.position = "top", title.hjust = 0.5)) + 
+  theme_bw() +
+  theme(legend.position = "bottom", legend.title = element_blank())  + 
+  labs(caption = "Red lines indicate median values.")
+path <- paste0(dirname(getwd()),"/02_programs/figures/country_classification_desertsoceans_income_v2.png")
+ggsave(path, width = 9, height = 8.1)
+
+
+
+
+  # Classify each country
+df_plot <- df_plot %>%
+  mutate(category = ifelse(SPI.INDEX.PIL4_3yr <= median_x & data_papers_pcap_3yr <= median_y, "Data Desert",
+                           ifelse(SPI.INDEX.PIL4_3yr > median_x & data_papers_pcap_3yr <= median_y, "Data Swamp",
+                                  ifelse(SPI.INDEX.PIL4_3yr <= median_x & data_papers_pcap_3yr > median_y_v2, "Data Oasis",
+                                         "Data Lake")))) %>%
+  mutate(category_adj = ifelse(SPI.INDEX.PIL4_3yr <= median_x & data_use_reg_adjusted_3yr_v2 <= median_y_v2, "Data Desert",
+                           ifelse(SPI.INDEX.PIL4_3yr > median_x & data_use_reg_adjusted_3yr_v2 <= median_y_v2, "Data Swamp",
+                                  ifelse(SPI.INDEX.PIL4_3yr <= median_x & data_use_reg_adjusted_3yr_v2 > median_y_v2, "Data Oasis",
+                                         "Data Lake")))) %>%
+mutate(category_adj_both = ifelse(SPI.INDEX.PIL4_3yr_reg_adjusted_3yr_v2 <= median_x_v2 & data_use_reg_adjusted_3yr_v2 <= median_y_v2, "Data Desert",
+                           ifelse(SPI.INDEX.PIL4_3yr_reg_adjusted_3yr_v2 > median_x_v2 & data_use_reg_adjusted_3yr_v2 <= median_y_v2, "Data Swamp",
+                                  ifelse(SPI.INDEX.PIL4_3yr_reg_adjusted_3yr_v2 <= median_x_v2 & data_use_reg_adjusted_3yr_v2 > median_y_v2, "Data Oasis",
+                                         "Data Lake")))) %>%  
+  arrange(category,iso3c)
+
+# Export df_plot to a CSV file
+path <- paste0(dirname(getwd()),"/03_output/country_classification_desertsoceans.csv")
+write.csv(df_plot, path, row.names = FALSE)
+    
+
+```
+
+
+
+b) Map
+
+```{r}
+#map of deserts oceans
+
+map_df <- df_plot %>%
+  right_join(country_metadata)%>%
+  mutate(category_adj=if_else(is.na(category_adj), as.character(NA), as.character(category_adj))) 
+
+ #set color pallete
+  col_pal <- c("#023047","#219ebc","#ffb703","#fb8500")  
+  names(col_pal) <- c("Data Lake","Data Oasis","Data Swamp","Data Desert" ) 
+  
+   p1 <- ggplot() +
+    geom_map(data = map_df, aes(map_id = iso3c, fill = category_adj), map = maps$countries) + 
+    geom_polygon(data = maps$disputed, aes(long, lat, group = group, map_id = id), fill = "grey80") + 
+    geom_polygon(data = maps$lakes, aes(long, lat, group = group), fill = "white")  +
+     geom_path(data = maps$boundaries,
+               aes(long, lat, group = group),
+               color = "white",
+               size = 0.3,
+               lineend = maps$boundaries$lineend,
+              linetype = maps$boundaries$linetype) +
+    scale_x_continuous(expand = c(0, 0), limits = standard_crop_wintri()$xlim) +
+    scale_y_continuous(expand = c(0, 0), limits = standard_crop_wintri()$ylim) +
+    scale_fill_manual(
+      name='Classification',
+      values=col_pal,
+      na.value='grey'
+    ) +
+    coord_equal() +
+    theme_map(base_size=12) +
+    labs(
+      caption = 'Source: SPI',
+      fill='Classification'
+    )
+   
+p1
+```
+
+## Table 3. Data Deserts, Oases, Lakes, and Swamps by Region and Income Group
+
+```{r}
+# create a table by region and income
+tab_df <- df_plot %>%
+  select(iso3c, region, income_level, category_adj) %>%
+  filter(!is.na(category_adj)) %>%
+  mutate(n_counties=1) %>%
+  pivot_wider(
+    names_from = 'category_adj',
+    values_from = 'n_counties',
+    values_fill=0) 
+
+
+region_table <- tab_df %>%
+  ungroup() %>%
+  group_by(region) %>%
+  summarise(across(c("Data Desert", "Data Oasis", "Data Swamp", "Data Lake"), ~paste0(round(100*mean(.x),0),"%")),
+            `Number of countries`=n())%>%
+  rename(group=region)
+
+
+income_table <- tab_df %>%
+  ungroup() %>%
+  group_by(income_level) %>%
+  summarise(across(c("Data Desert", "Data Oasis", "Data Swamp", "Data Lake"), ~paste0(round(100*mean(.x),0),"%")),
+            `Number of countries`=n()) %>%
+  rename(group=income_level)
+
+
+ovrl_table <- tab_df %>%
+  ungroup() %>%
+  summarise(across(c("Data Desert", "Data Oasis", "Data Swamp", "Data Lake"), ~paste0(round(100*mean(.x),0),"%")),
+            `Number of countries`=n()) %>%
+  mutate(group='Overall')
+
+region_table %>%
+  bind_rows(income_table) %>%
+  bind_rows(ovrl_table) %>%
+  flextable()
+
+```
+
+Note: Share of countries within a region or income group that are classified as data deserts, oases, swamps, or lakes. For example, 29% of the 17 countries in East Asia & Pacific are classified as data deserts. 
+
+## Table 4. Longitudinal Relationships between Number of Papers Using Data and Statistical Performance
+
+```{r index_weights}
+
+#define some weights for the longitudinal SPI that is built
+
+#Pillar 1 - Overall Weight
+pillar_1 <- 1/5
+#Dimension 1.5: Data Use by International Organizations
+dim_1_5 <- 1
+
+#Dimension 2 - Overall Weight
+pillar_2 <- 1/5
+#Dimension 2.1: Data releases
+dim_2_1 <- 1
+#Dimension 2.2: Online access
+dim_2_2 <- 0
+# Dimension 2.4: Data services
+dim_2_4 <- 0
+
+# Dimension 3 - Overall Weight
+pillar_3 <- 1/5
+# Dimension 3: SDG 1
+dim_3_1 <- 1/16
+# Dimension 3: SDG 2
+dim_3_2 <- 1/16
+# Dimension 3: SDG 3
+dim_3_3 <- 1/16
+# Dimension 3: SDG 4
+dim_3_4 <- 1/16
+# Dimension 3: SDG 5
+dim_3_5 <- 1/16
+# Dimension 3: SDG 6
+dim_3_6 <- 1/16
+# Dimension 3: SDG 7
+dim_3_7 <- 1/16
+# Dimension 3: SDG 8
+dim_3_8 <- 1/16
+# Dimension 3: SDG 9
+dim_3_9 <- 1/16
+# Dimension 3: SDG 10
+dim_3_10 <- 1/16
+# Dimension 3: SDG 11
+dim_3_11 <- 1/16
+# Dimension 3: SDG 12
+dim_3_12 <- 1/16
+# Dimension 3: SDG 13
+dim_3_13 <- 1/16
+# Dimension 3: SDG 15
+dim_3_15 <- 1/16
+# Dimension 3: SDG 16
+dim_3_16 <- 1/16
+# Dimension 3: SDG 17
+dim_3_17 <- 1/16
+
+#Dimension 4 - Overall Weight
+pillar_4 <- 1/5
+# Dimension 4.1: censuses and surveys
+dim_4_1.CEN <- 1/6
+dim_4_1.SVY <- 1/6
+#Dimension 4.2: administrative data
+dim_4_2 <- 1/3
+# Dimension 4.3: geospatial data
+dim_4_3 <- 0
+
+# Dimension 5 - Overall Weight
+pillar_5 <- 1/5
+# Dimension 5.2: Standards and Methods
+dim_5_1 <- 0
+dim_5_2 <- 1
+dim_5_5 <- 0
+
+
+#recalculate index based on the weights
+pillar_total <- pillar_1 + pillar_2 + pillar_3 + pillar_4 + pillar_5
+pillar2_total <- dim_2_1 + dim_2_2 + dim_2_4
+pillar3_total <- 
+  dim_3_1 + 
+  dim_3_2 +
+  dim_3_3 +
+  dim_3_4 +
+  dim_3_5 +
+  dim_3_6 +
+  dim_3_7 +
+  dim_3_8 +
+  dim_3_9 +
+  dim_3_10 +
+  dim_3_11 +
+  dim_3_12 +
+  dim_3_13 +
+  dim_3_15 +
+  dim_3_16 +
+  dim_3_17
+pillar4_total <- dim_4_1.CEN + dim_4_1.SVY + + dim_4_2 + dim_4_3
+pillar5_total <- dim_5_1 + dim_5_2 + dim_5_5
+
+
+```
+
+
+```{r}
+
+#supplement longitudinal data with sci
+sci_supplement_df <- readxl::read_excel(paste0(raw_data, "/misc/Statistical_Capacity_Indicators.xlsx"), sheet="Data") %>%
+  mutate(across(c('YR2004':'YR2020'), as.numeric)) %>%
+  pivot_longer(
+    cols=c('YR2004':'YR2020'),
+    names_to="Year",
+    values_to="value"
+  ) %>%
+  mutate(date=as.numeric(str_remove(Year, "YR"))) %>%
+  select(-Year) %>%
+  filter(!is.na(`Series Code`)) %>%
+  rename(iso3c=`Country Code`) %>%
+  pivot_wider(
+    names_from=`Series Code`, 
+    values_from=value,
+    values_fill=as.numeric(NA)
+  )
+
+
+reg_pan <- country_scores_annual_df %>%
+  left_join(sci_supplement_df) %>%
+  filter(date<=2019) %>%
+   mutate(
+    SPI.INDEX.PIL1.LONG=SPI.DIM1.5.INDEX,
+    SPI.INDEX.PIL2.LONG=`5.21.01.01.sdds`, #supplment with SCI
+    SPI.INDEX.PIL3.LONG=SPI.INDEX.PIL3/100,
+    SPI.DIM4.1.CEN.INDEX.LONG=rowMeans(across(c('3.11.01.01.popcen','3.01.04.01.agcen'))), #separate census and surveys 
+    SPI.INDEX.PIL4.LONG=(
+      (dim_4_1.CEN/pillar4_total)*SPI.DIM4.1.CEN.INDEX.LONG +
+      (dim_4_1.SVY/pillar4_total)*SPI.DIM4.1.SVY.INDEX +
+        (dim_4_2/pillar4_total)*`3.11.01.03.popreg` )
+    ,
+    SPI.DIM5.2.INDEX.LONG=rowMeans(across(c('2.01.01.02.nabase','2.01.03.01.prcpbase','2.04.01.01.excncpt','3.02.01.02.fscov'))),
+    SPI.INDEX.PIL5.LONG=(dim_5_2/pillar5_total)*SPI.DIM5.2.INDEX.LONG ,
+    SPI.INDEX.LONG=(pillar_1/pillar_total)*SPI.INDEX.PIL1.LONG +
+      (pillar_2/pillar_total)*SPI.INDEX.PIL2.LONG +
+      (pillar_3/pillar_total)*SPI.INDEX.PIL3.LONG +
+      (pillar_4/pillar_total)*SPI.INDEX.PIL4.LONG +
+      (pillar_5/pillar_total)*SPI.INDEX.PIL5.LONG 
+    #sum up based on individual dimension weights
+  ) %>% #
+  mutate(across(c('SPI.INDEX.LONG', 'SPI.INDEX.PIL1.LONG','SPI.INDEX.PIL2.LONG','SPI.INDEX.PIL3.LONG','SPI.INDEX.PIL4.LONG','SPI.INDEX.PIL5.LONG'),~100*.)) %>%
+  mutate(year=date) 
+    
+  
+reg_pan_extended <- reg_pan %>%
+  filter(!(is.na(NY.GDP.PCAP.PP.KD) | is.na(SP.POP.TOTL) | is.na(SPI.INDEX.LONG)))
+
+reg_pan_fixed <- reg_pan %>%
+    filter(!(is.na(NY.GDP.PCAP.PP.KD) | is.na(SP.POP.TOTL) | is.na(SPI.INDEX))) 
+
+
+models <- list(
+  '(1)'=feols(log(data_papers_3yr) ~ log(NY.GDP.PCAP.PP.KD) | country + year, data=reg_pan_extended) ,
+  '(2)'=feols(log(data_papers_3yr) ~ log(SP.POP.TOTL) | country + year, data=reg_pan_extended) ,  
+  '(3)'=feols(log(data_papers_3yr) ~ SPI.INDEX | country + year, data=reg_pan_fixed) ,  
+  '(4)'=feols(log(data_papers_3yr) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL)  | country + year, data=reg_pan_fixed),
+  '(5)'=feols(log(data_papers_3yr) ~ SPI.INDEX.LONG + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) | country  + year, data=reg_pan_extended),
+  '(6)'=feols(log(data_papers_3yr) ~  SPI.INDEX.PIL4.LONG  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) | country  + year, data=reg_pan_extended)
+  )
+
+modelsummary(models,
+             estimate= "{estimate}{stars}",
+             coef_rename = c("SPI.INDEX" = "SPI Overall Score",
+                             "SPI.INDEX.PIL1" = "SPI Data Use Score",
+                             "SPI.INDEX.PIL2" = "SPI Data Services Score",
+                             "SPI.INDEX.PIL3" = "SPI Data Products Score",
+                             "SPI.INDEX.PIL4" = "SPI Data Sources Score",
+                             "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
+                             "SPI.INDEX.LONG" = "SPI Overall Score (Extended Series)",
+                             "SPI.INDEX.PIL1.LONG" = "SPI Data Use Score (Extended Series)",
+                             "SPI.INDEX.PIL2.LONG" = "SPI Data Services Score (Extended Series)",
+                             "SPI.INDEX.PIL3.LONG" = "SPI Data Products Score (Extended Series)",
+                             "SPI.INDEX.PIL4.LONG" = "SPI Data Sources Score (Extended Series)",
+                             "SPI.INDEX.PIL5.LONG" = "SPI Data Infrastructure Score (Extended Series)",
+                             "log(NY.GDP.MKTP.PP.KD)" = "Log GDP",
+                             "log(NY.GDP.PCAP.PP.KD)" = "Log GDP per capita",
+                             "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
+                             "region"="Region",
+                             "log(SP.POP.TOTL)"="Log Population",
+                             "log(poverty_surveys)" = 'Log # of Poverty Surveys',
+                             "SG.LAW.INDX" = "Women Business and the Law Index Score (scale 1-100)",
+                             "gii"="Gender Inequality Index",
+                             "sigi"="Social Institutions and Gender Index",
+                             "NV.IND.MANF.ZS"  = "Manufacturing value added (% of GDP)",
+                              "NV.AGR.TOTL.ZS"= "Agriculture, forestry, fishing value added (% of GDP)",
+                              "BN.CAB.XOKA.GD.ZS"= "Current account balance (% of GDP)",
+                              "HD.HCI.OVRL" = "Human Capital Index (0-1 scale)",
+                              "SE.PRM.ENRR" = "School Enrollment, Primary (% gross)" ,
+                              "NE.TRD.GNFS.ZS" = "Trade (% of GDP)",
+                              "WGI.OVL" = "WGI Index",
+                              "CC.EST" = "WGI: Control of Corruption: Estimate",
+                              "GE.EST" = "WGI: Governance Effectiveness: Estimate",
+                              "PV.EST" = "WGI: Political Stability and Absence of Violence/Terrorism: Estimate",
+                              "RQ.EST" = "WGI: Regulatory Quality: Estimate",
+                              "RL.EST" = "WGI: Rule of Law: Estimate",
+                              "VA.EST" = "WGI: Voice and Accountability: Estimate"
+                             ),
+             notes="Data from the World Bank's World Development Indicators (WDI) and SPI.  WDI series codes include NY.GDP.PCAP.PP.KD, SP.POP.TOTL, IQ.SPI.OVRL,IQ.SPI.PIL1,IQ.SPI.PIL2, IQ.SPI.PIL3, IQ.SPI.PIL4, IQ.SPI.PIL5.  Papers include all papers using data years 2004-2019. SPI Extended Series data supplements SPI data with data from Statistical Capacity Indicator (SCI) to extend series back to 2004.
+              ***=0.001 level
+              **=0.01 level
+              *=0.05 level
+              +=0.1 level",
+             escape = FALSE,
+             fmt = 2,
+             output='flextable'
+             )
+
+```
+
+
+
+
+## Figure 8. Panel Relationships Between Number of Papers Using Data and Data Sources
+
+```{r panelplot}
+
+reg_pan_extended <- reg_pan_extended %>%
+  mutate(
+    Pop.Cen=as.numeric(`3.11.01.01.popcen`==1),
+    Ag.Cen=as.numeric(`3.01.04.01.agcen`==1),
+    House.Svy=as.numeric(SPI.D4.1.4.HOUS>=0.5),
+    Ag.Svy=as.numeric(SPI.D4.1.5.AGSVY>=0.5),
+    Labr.Svy=as.numeric(SPI.D4.1.6.LABR>=0.5),
+    Hlth.Svy=as.numeric(SPI.D4.1.7.HLTH>=0.5),
+    Bizz.Svy=as.numeric(SPI.D4.1.8.BZSVY>=0.5),
+    CRVS=as.numeric(`3.11.01.03.popreg`==1)
+  ) 
+
+source_models <- list(
+  '(1)'=feols(log(data_papers_3yr) ~ i( date,log(SP.POP.TOTL), 2010) + i(date, log(NY.GDP.PCAP.PP.KD), 2010) + Pop.Cen | country + year  , data=reg_pan_extended),
+  '(2)'=feols(log(data_papers_3yr) ~ Ag.Cen + i( date,log(SP.POP.TOTL), 2010) + i(date, log(NY.GDP.PCAP.PP.KD), 2010) | country + year , data=reg_pan_extended),
+  '(4)'=feols(log(data_papers_3yr) ~  House.Svy  + i( date,log(SP.POP.TOTL), 2010) + i(date, log(NY.GDP.PCAP.PP.KD), 2010) | country + year , data=reg_pan_extended),
+  '(5)'=feols(log(data_papers_3yr) ~  Ag.Svy + i( date,log(SP.POP.TOTL), 2010) + i(date, log(NY.GDP.PCAP.PP.KD), 2010) | country + year , data=reg_pan_extended),
+  '(6)'=feols(log(data_papers_3yr) ~  Labr.Svy + i( date,log(SP.POP.TOTL), 2010) + i(date, log(NY.GDP.PCAP.PP.KD), 2010) | country + year , data=reg_pan_extended),
+  '(7)'=feols(log(data_papers_3yr) ~ Hlth.Svy  + i( date,log(SP.POP.TOTL), 2010) + i(date, log(NY.GDP.PCAP.PP.KD), 2010) | country + year , data=reg_pan_extended),
+  '(8)'=feols(log(data_papers_3yr) ~  Bizz.Svy  + i( date,log(SP.POP.TOTL), 2010) + i(date, log(NY.GDP.PCAP.PP.KD), 2010) | country + year , data=reg_pan_extended),
+  '(9)'=feols(log(data_papers_3yr) ~  CRVS  + i( date,log(SP.POP.TOTL), 2010) + i(date, log(NY.GDP.PCAP.PP.KD), 2010) | country + year , data=reg_pan_extended)
+  )
+
+
+
+modelplot(source_models,
+          coef_map= c("SPI.INDEX" = "SPI Overall Score",
+                             "SPI.INDEX.PIL1" = "SPI Data Use Score",
+                             "SPI.INDEX.PIL2" = "SPI Data Services Score",
+                             "SPI.INDEX.PIL3" = "SPI Data Products Score",
+                             "SPI.INDEX.PIL4" = "SPI Data Sources Score",
+                             "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
+
+                             "SPI.D4.1.1.POPU" = "Population Census Score" ,
+                             "SPI.D4.1.2.AGRI" = "Agriculture Census Score",
+                             "SPI.D4.1.3.BIZZ" = "Business Census Score",
+                             "SPI.D4.1.4.HOUS" = "Household Income/Consumption Survey Score",
+                             "SPI.D4.1.5.AGSVY"= "Agriculture Survey Score" , 
+                             "SPI.D4.1.6.LABR" = "Labor Force Survey Score", 
+                             "SPI.D4.1.7.HLTH" = "Health Survey Score", 
+                             "SPI.D4.1.8.BZSVY" = "Business/Establishment Survey Score",
+                             "SPI.D4.2.3.CRVS" = "Complete Civil Registration and Vital Statistics System Score",
+                             
+                             "SPI.D4.3.GEO.first.admin.level"= "Availability of Data at 1st Admin Level (ODIN) Score",
+                             "CRVS" = "Complete Civil Registration and Vital Statistics System",
+                              "Bizz.Svy" = "Business/Establishments: 2 or more in 10 years",
+                             "Hlth.Svy" = "Health Surveys: 2 or more in 10 years", 
+                               "Labr.Svy" = "Labor Force Surveys: 2 or more in 10 years", 
+                               "Ag.Svy"= "Agriculture Surveys: 2 or more in 10 years" , 
+                             "House.Svy" = "Household surveys: 2 or more in 10 years",
+                             "Bizz.Cen" = "Business/Establishment Census in past 10 years",
+                               "Ag.Cen" = "Agriculture Census  in past 10 years",
+                            "Pop.Cen" = "Population Census in past 10 years" ,
+                            "NV.IND.MANF.ZS"  = "Manufacturing value added (% of GDP)",
+                              "NV.AGR.TOTL.ZS"= "Agriculture, forestry, fishing value added (% of GDP)",
+                              "BN.CAB.XOKA.GD.ZS"= "Current account balance (% of GDP)",
+                              "HD.HCI.OVRL" = "Human Capital Index (0-1 scale)",
+                              "SE.PRM.ENRR" = "School Enrollment, Primary (% gross)" ,
+                              "NE.TRD.GNFS.ZS" = "Trade (% of GDP)",
+                              "WGI.OVL" = "WGI Index",
+                              "CC.EST" = "WGI: Control of Corruption: Estimate",
+                              "GE.EST" = "WGI: Governance Effectiveness: Estimate",
+                              "PV.EST" = "WGI: Political Stability and Absence of Violence/Terrorism: Estimate",
+                              "RQ.EST" = "WGI: Regulatory Quality: Estimate",
+                              "RL.EST" = "WGI: Rule of Law: Estimate",
+                              "VA.EST" = "WGI: Voice and Accountability: Estimate"
+                             
+
+                             ),
+          ) +
+  labs(subtitle='Partial regression coefficients conditional on \n log GDP per capita, log population, and \n country and year fixed effects.',
+      caption="Data from the World Bank's World Development Indicators (WDI) and SPI. \n Papers include all papers using data years 2000-2020. \n Confidence Intervals at 95% significance level") +
+  geom_vline(xintercept = 0) +
+  theme(
+    legend.position = 'none'
+  )
+
+```
+
+
+
+## Figure 9. Comparison Between All Papers Using Data and Non-Medical Papers Using Data
+
+```{r med}
+
+ggplot(country_scores_aggregate_df, aes(x=data_papers, y=data_papers_nomed)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+  scale_x_log10(labels=scales::comma) +
+  scale_y_log10(labels=scales::comma) +
+  xlab("All Papers Using Data") +
+  ylab("Non-Medical Papers Using Data") +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 40, y = 20,label = eq_plot_txt(country_scores_aggregate_df, data_papers_nomed,data_papers)), hjust=0.2, size=4
+  ) +
+  bbc_style() 
+
+
+```
+
+
+## Figure 10. Correlation in Papers Using Data Across Subjects.  2000-2020.
+```{r, fig.width=10, fig.height=8}
+library(GGally)
+
+ggally_df <- country_scores_aggregate_df  %>%
+  select(data_papers, data_papers_Medicine, data_papers_Economics, data_papers_Psychology, data_papers_Sociology, data_papers_Political_Science)
+
+ggpairs(ggally_df,
+        columnLabels=c("All", "Medicine", "Economics", "Psychology", "Sociology", "Poli Sci")) +
+  theme_few() +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(subtitle="Logged number of Articles")
+```
+
+
+
+
+
+
+
+
+# Appendix
+
+
+
+## Table A.1. Country Scores on Academic Data Use per capita. Year 2019.
+
+Countries shaded in dark orange have the lowest numbers of data use articles, countries in dark green have the highest Countries are grouped into five groups:
+ 
+
+* **Top Quintile**:  Countries in the Top quintile are classified in this group.  Shading in <span style="color:#2ec4b6">dark green</span>.    
+* **4th Quintile**: Countries in the 4th quintile, or those above the 60th percentile but below the 80th percentile are in this group.  Shading in <span style="color:#acece7">light green</span>.    
+* **3rd Quintile**: Countries in the 3rd quintile, or those between the 40th and 60th percentile, are classified in this group.  Shading in <span style="color:#f1dc76">yellow</span>.  
+* **2nd Quintile**: Countries in the 2nd quintile, or those above the 20th percentile but below the 40th percentile, are in this group.  Shading in <span style="color:#ffbf69">light orange</span>.  
+* **Bottom 20%**: Countries in the bottom 20% are classified in this group.  Shading in <span style="color:#ff9f1c">dark orange </span>.  
+
+```{r}
+
+#colors
+
+col_palette <- c("#2ec4b6", "#acece7", "#f1dc76",  "#ffbf69","#ff9f1c"   )
+
+col_palette2 <- c("#2ec4b6",  "#f1dc76", "#ff9f1c" )
+
+#make the table
+index_df <- data_use_df %>%
+  filter(date==2019) %>%
+  filter(SP.POP.TOTL>10^6) %>%
+  ungroup() %>%
+  select(country, data_use_pcap_3yr, data_papers ) %>%
+  mutate(across(c('data_use_pcap_3yr'),round,2)) %>%
+  arrange(desc(data_use_pcap_3yr))
+
+ #calculate the breaks for the color coding
+        brks <- quantile(index_df$data_use_pcap_3yr, probs=c(1,2,3,4)/5,na.rm=T)
+
+
+        brks1 <- quantile(index_df$data_use_pcap_3yr, probs=c(1,2,3,4)/5,na.rm=T)
+        brks1 <- append(min(index_df$data_use_pcap_3yr, na.rm=T),brks1)
+        brks1 <- append(brks1,max(index_df$data_use_pcap_3yr, na.rm=T))
+
+        brks2 <- quantile(index_df$data_papers, probs=c(1,2,3,4)/5,na.rm=T)
+        brks2 <- append(min(index_df$data_papers, na.rm=T),brks2)
+        brks2 <- append(brks2,max(index_df$data_papers, na.rm=T))   
+      
+
+      #make nice looking
+      index_tab <- index_df %>%
+        flextable() %>%
+        set_header_labels(values=list(
+                             country="Country",
+                             data_use_pcap_3yr="Articles using data per million persons",
+                             data_papers="Total Number of Articles using data"
+
+                                         )) %>%
+          bg(j = c('data_use_pcap_3yr'),
+             bg = scales::col_bin(col_palette, domain=c(0,1000), bins=brks1, reverse=TRUE)) %>%
+          bg(j = c('data_papers'),
+             bg = scales::col_bin(col_palette, domain=c(0,15000), bins=brks2, reverse=TRUE)) 
+
+index_tab %>%
+  autofit()
+```
+
+
+## Figure A.1 Amazon Mturk Prompt
+
+![](mturk_prompt.png)
+
+## Figure A.2. Comparison to Number of Academic Articles from other papers
+
+a)	Comparison with Das et al. (2013)
+
+
+```{r}
+das_porteous_compare_df <- read_csv(paste0(raw_data, "/das_porteous_compare.csv")) %>%
+  rename(country=`Country name`,
+         das_papers=`Das Total number of publications (1985–2005)`,
+         porteous_papers=`Porteous All Journals`) %>%
+  left_join(country_scores_aggregate_df)
+
+
+ggplot(das_porteous_compare_df, aes(y=data_papers_estimate, x=das_papers)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+  scale_x_log10(labels=scales::comma) +
+  scale_y_log10(labels=scales::comma) +
+  xlab("Number of Papers according to Das, Do, Shaines, and Srikant (2013)") +
+  ylab('Number of Papers using Data (2000-2020)') +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 100, y = 100,label = eq_plot_txt(das_porteous_compare_df, data_papers_estimate, das_papers), hjust=0.2)
+  ) +
+  bbc_style()
+
+
+
+```
+
+b)	Comparison with Porteous (2020)
+
+```{r}
+#plot porteous papers against our measrue
+
+ggplot((das_porteous_compare_df ), aes(y=data_papers_estimate, x=porteous_papers)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+  scale_x_log10(labels=scales::comma) +
+  scale_y_log10(labels=scales::comma) +
+  xlab("Number of Papers according to Porteous (2022)") +
+  ylab('Number of Papers using Data (2000-2020)') +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 100, y = 100,label = eq_plot_txt(das_porteous_compare_df, data_papers_estimate, porteous_papers), hjust=0.2)
+  ) +
+  bbc_style()
+```
+
+c)	Comparison with NSF database of scientific and technical articles (2018)
+
+```{r natacad}
+
+#pull data on scientific and technical journal articles produced based on Source: National Science Foundation, Science and Engineering Indicators.
+# nsf_compare <- wbstats::wb_data(indicator='IP.JRN.ARTC.SC',
+#                                 start_date = 2018, end_date = 2018) %>%
+#   left_join(country_scores_annual_df)
+# 
+# write_excel_csv(nsf_compare, paste0(raw_data, "/nsf_compare.csv"))
+
+nsf_compare <- read_csv(paste0(raw_data, "/nsf_compare.csv"))
+#plot porteous papers against our measrue
+
+ggplot((nsf_compare ), aes(y=data_papers_estimate, x=IP.JRN.ARTC.SC)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+  scale_x_log10(labels=scales::comma) +
+  scale_y_log10(labels=scales::comma) +
+  xlab("Number of Papers according to NSF (2018)") +
+  ylab('Number of Papers using Data (2018)') +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 100, y = 100,label = eq_plot_txt(nsf_compare, papers_estimate, IP.JRN.ARTC.SC), hjust=0.2)
+  ) +
+  bbc_style()
+```
+
+##  Figure A.3. Comparison of the Number of Qualitative and Quantitative Papers
+
+```{r}
+
+#Goal is to check if there is compensation where countries without data produce more qualitative papers.  
+mod <- lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL),  data=country_scores_aggregate_df %>% filter(data_papers>0)) 
+
+
+
+#Look at production of quantitative versus qualitative production
+quan_qual_df <- country_scores_aggregate_df %>%
+  mutate(qual_gap=100*(qual_papers)/papers) %>%
+  mutate(data_papers_pcap=10^6*data_papers/SP.POP.TOTL) %>%  
+  modelr::add_residuals(mod) %>%
+  filter(qual_papers>0 & data_papers>0)
+
+mod2 <- lm(log(qual_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL),  data=quan_qual_df) 
+
+#add residuals from qual papers
+
+quan_qual_df <- quan_qual_df %>%
+  modelr::add_residuals(mod2,var = 'qual_resid') 
+
+ggplot(quan_qual_df, aes(y=qual_resid, x=resid)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+
+  ylab("Qualitative Articles (deviation)") +
+  xlab('Data Use Articles (deviation)') +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 1, y = -3,label = eq_plot_txt(quan_qual_df, qual_resid,resid)), hjust=0.2, size=4
+  ) +
+  bbc_style() 
+
+```
+
+
+## Figure A.4. Share of Qualitative Papers vs SPI Overall Score. 2017-2019. 
+
+```{r}
+
+ ggplot(quan_qual_df, aes(y=qual_gap, x=SPI.INDEX)) +
+  geom_point() +
+  geom_text_repel(aes(label=iso3c)) +
+
+  xlab("SPI Overall Score") +
+  ylab('Share of Qualitative Papers to Total # of Papers') +
+  geom_smooth(method = "lm") +
+  geom_richtext(
+    aes(x = 40, y = 20,label = eq_plot_txt(quan_qual_df, qual_gap,SPI.INDEX)), hjust=0.2, size=4
+  ) +
+  bbc_style() +
+  labs(title="") 
+```
+
+Figure A.5. Relationship between Data Research and Data Supply
+
+a) Country Scatterplot
+
+
+```{r}
+ggplot(df_plot, aes(x = SPI.INDEX.PIL4_3yr, y = data_papers_pcap_3yr)) +
+  geom_point(aes(colour = income_level)) +
+  geom_text_repel(aes(label = iso3c)) +
+  geom_vline(xintercept = median_x, linetype="dashed", color = "red") +
+  geom_hline(yintercept = median_y, linetype="dashed", color = "red") +
+  geom_richtext(aes(x = min_x, y = min_y, label = "<b>Deserts: <br>low data supply, <br>little data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(aes(x = max_x, y = (max_y+200), label = "<b>Lakes: <br>high data supply, <br>high data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(aes(x = max_x, y = min_y, label = "<b>Swamps: <br>high data supply, <br>little data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(aes(x = min_x, y = (max_y+100), label = "<b>Oases: <br>low data supply, <br>high data research</b>"), fill = "lightblue", alpha = 0.8) +
+  scale_x_continuous(expand = expansion(mult = c(0.2, 0.2))) +
+  scale_y_log10(labels=scales::comma,
+                expand = expansion(mult = c(0.2, .2))) +
+  labs(y = "# papers using data per capita (avg. 2017-2019)", 
+       x = "SPI Pillar 4 (avg. 2017-2019)",
+       colour = NULL) +
+  guides(colour = guide_legend(nrow = 1, title.position = "top", title.hjust = 0.5)) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.title = element_blank())  + 
+  labs(caption = "Red lines indicate median values.")
+path <- paste0(dirname(getwd()),"/02_programs/figures/country_classification_desertsoceans_income.png")
+ggsave(path, width = 9, height = 8.1)
+```
+
+b) Map
+
+```{r}
+#map of deserts oceans
+
+map_df <- df_plot %>%
+  right_join(country_metadata)%>%
+  mutate(category=if_else(is.na(category), as.character(NA), as.character(category))) 
+
+ #set color pallete
+  col_pal <- c("#023047","#219ebc","#ffb703","#fb8500")  
+  names(col_pal) <- c("Lake","Oasis","Swamp","Desert" ) 
+  
+   p1 <- ggplot() +
+    geom_map(data = map_df, aes(map_id = iso3c, fill = category), map = maps$countries) + 
+    geom_polygon(data = maps$disputed, aes(long, lat, group = group, map_id = id), fill = "grey80") + 
+    geom_polygon(data = maps$lakes, aes(long, lat, group = group), fill = "white")  +
+     geom_path(data = maps$boundaries,
+               aes(long, lat, group = group),
+               color = "white",
+               size = 0.3,
+               lineend = maps$boundaries$lineend,
+              linetype = maps$boundaries$linetype) +
+    scale_x_continuous(expand = c(0, 0), limits = standard_crop_wintri()$xlim) +
+    scale_y_continuous(expand = c(0, 0), limits = standard_crop_wintri()$ylim) +
+    scale_fill_manual(
+      name='Classification',
+      values=col_pal,
+      na.value='grey'
+    ) +
+    coord_equal() +
+    theme_map(base_size=12) +
+    labs(
+      caption = 'Source: SPI',
+      fill='Classification'
+    )
+   
+p1
+```
+
+
+## Table A.2. Relationship between Data Use in Academia and Data Sources from SPI.
+
+
+```{r}
+
+
+sources_summary 
+```
+
+    
+    
+
+
+
+

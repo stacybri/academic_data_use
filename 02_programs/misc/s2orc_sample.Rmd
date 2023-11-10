@@ -1,0 +1,192 @@
+---
+title: "Article Sample"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(jsonlite)
+library(here)
+
+dir <- here()
+
+seedling <- 7215887
+set.seed(seedling)
+
+#number of articles per strata
+n_articles <- 1500
+
+```
+
+Read in the json files and then sample a set of articles.
+
+```{r jsonload, eval=FALSE, include=FALSE}
+
+#load a json file.
+
+sample_frame <- stream_in(file(paste0(dir, "/01_raw_data/metadata/included/metadata_0.jsonl")))
+
+save(sample_frame, file=paste0(dir, "/01_raw_data/metadata/included/metadata_0.Rdata"))
+
+```
+
+
+```{r}
+
+load(paste0(dir, "/01_raw_data/metadata/included/metadata_0.Rdata"))
+
+
+```
+
+```{r}
+excluded_fields <- c('Biology','Chemistry', 'Engineering', 'Physics','Materials Science', 'Geology', 'Art')
+
+sample_restricted1 <- sample_frame %>%
+  filter(!is.na(abstract)) 
+
+abstract_restrict <- (nrow(sample_frame) - nrow(sample_restricted1))/nrow(sample_frame)
+
+sample_restricted2 <- sample_restricted1 %>%
+  filter(year>2000) 
+
+year_restrict <- (nrow(sample_restricted1) - nrow(sample_restricted2))/nrow(sample_frame)
+
+sample_restricted <- sample_restricted2 %>% #keep just recent articles
+  mutate(
+    group_name=case_when( #specify  for each field type. 
+      grepl('Economics', mag_field_of_study)  ~ 'Economics',
+      grepl('Political Science', mag_field_of_study)  ~ 'Political Science',
+      grepl('Business', mag_field_of_study)  ~ 'Business',
+      grepl('Sociology'	, mag_field_of_study)  ~ 'Sociology',
+      grepl('Medicine', mag_field_of_study) ~ 'Medicine',
+      grepl('Computer Science', mag_field_of_study)  ~ 'Computer Science',
+      grepl('Math'	, mag_field_of_study)  ~ 'Math',
+      grepl('Psychology', mag_field_of_study)	 ~ 'Psychology',
+      grepl('Geography'	, mag_field_of_study)  ~ 'Geography',
+      grepl('History'	, mag_field_of_study)  ~ 'History',
+      grepl('Philosophy'	, mag_field_of_study)  ~ 'Philosophy',
+      grepl('Biology', mag_field_of_study) ~ 'Biology', #excluded
+      grepl('Chemistry', mag_field_of_study)  ~ 'Chemistry', #excluded
+      grepl('Engineering', mag_field_of_study)  ~ 'Engineering', #excluded	
+      grepl('Physics', mag_field_of_study)	 ~ 'Physics', #excluded
+      grepl('Material Science', mag_field_of_study)  ~ 'Material Science', #excluded
+      grepl('Geology'	, mag_field_of_study)  ~ 'Geology', #excluded
+      grepl('Environmental Science'	, mag_field_of_study) ~ 'Environmental Science', #excluded
+      grepl('Art'	, mag_field_of_study)  ~ 'Art', #excluded
+      TRUE ~ 'Other'),
+    
+    sample_share=case_when( #specify the fraction of the sample for each field type.  Oversample development fields
+      group_name=='Medicine' ~ .15,
+      group_name=='Biology' ~ 0, #excluded
+      group_name=='Chemistry'  ~ 0, #excluded
+      group_name=='Engineering'  ~ 0, #excluded	
+      group_name=='Computer Science'  ~ 0, #excluded
+      group_name=='Physics'	 ~ 0, #excluded
+      group_name=='Material Science'  ~ 0, #excluded
+      group_name=='Math'	  ~ 0, #excluded
+      group_name=='Psychology'	 ~ .15,
+      group_name=='Economics'  ~ .25,
+      group_name=='Political Science'  ~ .25,
+      group_name=='Business'  ~ .10,
+      group_name=='Geology'	  ~ 0, #excluded
+      group_name=='Sociology'	  ~ .10,
+      group_name=='Geography'	  ~ 0, #excluded
+      group_name=='Environmental Science'	 ~ 0, #excluded
+      group_name=='Art'	  ~ 0, #excluded
+      group_name=='History'	  ~ 0, #excluded
+      group_name=='Philosophy'	  ~ .0, #excluded
+      TRUE ~ 0)
+    )  %>%
+  filter(sample_share>0) %>% #remove excluded fields
+  group_by(group_name) %>% 
+  mutate(field_count=n()) %>%
+  ungroup() %>%
+  mutate(field_share=field_count/n(),
+         total_count=n())
+
+
+field_restrict <-  (nrow(sample_restricted2) - nrow(sample_restricted))/nrow(sample_frame)
+
+
+write_excel_csv(sample_restricted, file=paste0(dir, "/03_output/sample/sample_frame_",Sys.Date(),".csv"))
+
+
+```
+
+
+```{r}
+#read in the list of files
+file_list<- list.files(paste0(dir, "/03_output/sample/"))
+
+
+#turn into dataframe and read
+previous_samples_df <- data.frame(batch=file_list)
+
+#read the files
+previous_samples_df <- previous_samples_df %>%
+  mutate(Data=map(
+    batch, ~read_csv(file=paste0(dir, "/03_output/sample/",.))
+  )) %>%
+  unnest(Data) %>%
+  transmute(
+    paper_id=as.character(paper_id),
+    title=title,
+    abstract=abstract,
+    sampled='Previously Sampled'
+  )
+
+#drop articles already sampled
+sample_restricted <- sample_restricted %>%
+  left_join(previous_samples_df) %>%
+  filter(is.na(sampled))
+
+```
+
+Draw sample.
+
+The frame is divided into groups based on the major field of study of the article.  Each field has a pre-specified share of articles that are define above.  Within each field (strata) the probability of selection is equal for all articles in the strata.  Simple random sampling within strata.  
+
+For each strata (Field of study), $j$ the probability an article is selected is:
+
+$$ p_j=\frac{n}{N} $$
+
+where n is the number of articles to be chosen in the field, and N is the total number of articles within that field.
+
+The sample weights then
+
+
+```{r}
+
+sample_selected <- sample_restricted %>%
+  group_by(group_name) %>%
+  sample_n(size=n_articles*sample_share) %>%
+  select(paper_id, title, abstract, year, journal, doi, mag_field_of_study, has_pdf_parse, has_pdf_parsed_abstract, has_pdf_parsed_body_text , s2_url, group_name, sample_share, field_count, field_share) %>%
+  mutate(seed=seedling,
+         n_articles=n_articles)
+
+```
+
+Check if any articles have been sampled before
+```{r}
+
+overlap_df <- previous_samples_df %>%
+  inner_join(sample_selected)
+
+#should be zero rows
+nrow(overlap_df)
+```
+
+
+```{r}
+sample_selected %>% group_by(group_name,sample_share, field_count, field_share) %>% summarise(n=n())
+```
+
+Save to csv
+```{r}
+write_excel_csv(sample_selected, file=paste0(dir, "/03_output/sample/selection_",Sys.Date(),".csv"))
+
+
+```
+
