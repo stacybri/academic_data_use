@@ -5,7 +5,6 @@ date: "`r Sys.Date()`"
 output:
   word_document: 
     number_sections: true
-bibliography: bibliography.bib
 ---
 
 ```{r setup, include=FALSE}
@@ -1807,7 +1806,7 @@ map_df <- df_plot %>%
 
  #set color pallete
   col_pal <- c("#023047","#219ebc","#ffb703","#fb8500")  
-  names(col_pal) <- c("Lake","Oasis","Swamp","Desert" ) 
+  names(col_pal) <- c("Data Lake","Data Oasis","Data Swamp","Data Desert" ) 
   
    p1 <- ggplot() +
     geom_map(data = map_df, aes(map_id = iso3c, fill = category), map = maps$countries) + 
