@@ -77,7 +77,9 @@ country_metadata <- wb_countries() %>%
 #file is saved as .fst format for faster reading
 tictoc::tic("fst")
 articles_year_df <- s3read_using(read.fst,object='s3://data-use-academia/03_output/results_completed_updated_20231003.fst') %>%
-  as.data.table()
+  as.data.table() %>%
+  # arrange columns so that "paper_id" "title" "abstract"   "year" "doi" "venue" "journal"  "mag_field_of_study"  "group_name" "data_use" "outbound_citations" "inbound_citations "places"   "countries" come first then everything
+  select(paper_id, title, abstract, year, doi, venue, journal, mag_field_of_study, group_name, data_use, outbound_citations, inbound_citations, places, countries, everything()) 
 tictoc::toc()
 
 
@@ -85,7 +87,7 @@ tictoc::toc()
 correlates_df <- read_csv(paste0(raw_data, "/correlates_df.csv"))
 
 #get a list of the columns names in the file
-countries_list <- colnames(articles_year_df[,27:263])
+countries_list <- colnames(articles_year_df[,16:263])
 
 #get number of articles by country. Both using data and not using data
 articles_year_country_df <- articles_year_df[,lapply(.SD, sum, na.rm=TRUE), by=year, .SDcols=countries_list]
