@@ -261,7 +261,7 @@ testing_df <- read_csv(paste0(raw_data,"/test_doc_wcounts.csv")) %>%
 
 ############
 # read in all mturk articles
-mturk_articles_df <- read_csv(paste0(output,'/mturk_article_classifications.csv')) %>%
+mturk_articles_df <- read_csv(paste0(raw_data,'/mturk_article_classifications.csv')) %>%
   as.data.table() %>%
   distinct(paper_id, .keep_all=TRUE) %>%
   left_join(articles_year_df[,.(paper_id, data_use)] ) %>%
