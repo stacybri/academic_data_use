@@ -563,10 +563,10 @@ print(p1)
 sumstats_tab <- articles_year_df %>%
   transmute(
     `Year of Publication`=year,
-    `Published in Journal (1=yes)`=as.numeric(journal==""),
+    `Published in Journal (1=yes)`=as.numeric(journal!=""),
     Field=group_name,
     `Data Use (1=yes)`=as.numeric(data_use=="Yes"),
-    `Country Identified (1=yes)`=if_else(nf==1,0,1)
+    `Country Identified (1=yes)`=if_else(nf==1,0,1,0)
   ) %>%
   group_by(Field) %>%
   summarise(across(c('Published in Journal (1=yes)','Data Use (1=yes)','Country Identified (1=yes)'),~round(mean(.),2)),
