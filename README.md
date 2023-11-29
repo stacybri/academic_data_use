@@ -28,7 +28,7 @@ The code in this replication packages constructs the analysis files and tables a
 
 * Clone the repository to your local machine.
 
-* Before executing the Missing-SDG-Gender-Indicators.Rmd
+* Before executing the Data_Use_Academia_tables_figures.Rmd
 file, users should set up the appropriate environment. The
 renv package helps maintain consistent package versions and
 dependencies, ensuring that users have the required libraries.
