@@ -2,3 +2,11 @@
 .Rhistory
 .RData
 .Ruserdata
+01_raw_data/results_completed_updated_20231003.fst
+01_raw_data/data_use_model/pytorch_model.bin
+01_raw_data/data_use_model/config.json
+01_raw_data/data_use_model/tokenizer_config.json
+01_raw_data/data_use_model/tokenizer.json
+01_raw_data/data_use_model/tokenizer.json
+01_raw_data/data_use_model/vocab.txt
+01_raw_data/data_use_model/special_tokens_map.json
