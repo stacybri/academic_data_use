@@ -231,6 +231,35 @@ articles_data_use_top100_year_df <- articles_data_use_top100_year_df %>%
          data_papers_top100_estimate_3yr=rollmean(data_papers_top100_estimate, k=3, align='left', fill=NA),
          data_papers_top100_3yr=rollmean(data_papers_top100, k=3, align='left', fill=NA))
 
+#keep just articles in the top 200 of journal rankings
+articles_year_df_top200 <- articles_year_df %>%
+  left_join(journal_list %>%
+                arrange(desc(`Cites / Doc. (2years)`)) %>%
+              #keep top 200
+              filter(row_number()<=200)) %>%
+  #keep just articles with a journal ranking
+  filter(!is.na(`Cites / Doc. (2years)`))
+
+#get number of articles using data by country
+articles_data_use_top200_year_df <- articles_year_df_top200[data_use=="Yes",lapply(.SD, sum, na.rm=TRUE), by=year, .SDcols=countries_list]
+
+#pivot longer
+articles_data_use_top200_year_df <- articles_data_use_top200_year_df %>% 
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='data_papers_top200'
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) %>%  
+  mutate(data_papers_top200_estimate=data_papers_top200/article_share,
+         data_papers_top200_estimate_3yr=rollmean(data_papers_top200_estimate, k=3, align='left', fill=NA),
+         data_papers_top200_3yr=rollmean(data_papers_top200, k=3, align='left', fill=NA))
+
+
 #keep just the articles in the top 500 of journal rankings
 articles_year_df_top500 <- articles_year_df %>%
   left_join(journal_list %>%
@@ -350,6 +379,7 @@ country_scores_annual_df <- articles_year_country_df %>%
   left_join(articles_data_use_year_restrict_df) %>%
   left_join(articles_data_use_year_subject_df) %>%
   left_join(articles_data_use_top100_year_df) %>%
+  left_join(articles_data_use_top200_year_df) %>%
   left_join(articles_data_use_top500_year_df) %>%
   left_join(articles_data_use_impact_year_df) %>%
   left_join(citations_year_country_df) %>%
@@ -377,6 +407,8 @@ country_scores_aggregate_df <- country_scores_annual_df %>%
             data_papers_nomed_estimate=sum(data_papers_nomed_estimate, na.rm=T),
             data_papers_top100=sum(data_papers_top100, na.rm=T),
             data_papers_top100_estimate=sum(data_papers_top100_estimate, na.rm=T),
+            data_papers_top200=sum(data_papers_top200, na.rm=T),
+            data_papers_top200_estimate=sum(data_papers_top200_estimate, na.rm=T),
             data_papers_top500=sum(data_papers_top500, na.rm=T),
             data_papers_top500_estimate=sum(data_papers_top500_estimate, na.rm=T),
             data_papers_impact=sum(data_papers_impact, na.rm=T),
@@ -409,6 +441,8 @@ country_scores_recent_df <- country_scores_annual_df %>%
             data_papers_nomed_estimate=sum(data_papers_nomed_estimate, na.rm=T),
             data_papers_top100=sum(data_papers_top100, na.rm=T),
             data_papers_top100_estimate=sum(data_papers_top100_estimate, na.rm=T),
+            data_papers_top200=sum(data_papers_top200, na.rm=T),
+            data_papers_top200_estimate=sum(data_papers_top200_estimate, na.rm=T),
             data_papers_top500=sum(data_papers_top500, na.rm=T),
             data_papers_top500_estimate=sum(data_papers_top500_estimate, na.rm=T),
             data_papers_impact=sum(data_papers_impact, na.rm=T),
@@ -900,7 +934,16 @@ plt_df <- plt_df %>%
 ```{r, fig.width=8, fig.height=12}
 
 reg_df_fixedn <- reg_df %>%
-  filter(!(is.na(NY.GDP.PCAP.PP.KD) | is.na(SP.POP.TOTL) | is.na(SPI.INDEX))) 
+  filter(!(is.na(NY.GDP.PCAP.PP.KD) | is.na(SP.POP.TOTL) | is.na(SPI.INDEX))) %>%
+  mutate(
+    log_data_papers_top100=if_else(data_papers_top100==0,0.05,data_papers_top100), #0.01 seems to match best the glm estimates when logged
+    log_data_papers_top100=log(log_data_papers_top100),
+    log_data_papers_top200=if_else(data_papers_top200==0,0.05,data_papers_top200),
+    log_data_papers_top200=log(log_data_papers_top200),
+    log_data_papers_top500=if_else(data_papers_top500==0,0.05,data_papers_top500),
+    log_data_papers_top500=log(log_data_papers_top500),
+    log_citations_data_use_articles=if_else(citations_data_use_articles==0, 0.01, citations_data_use_articles),
+    log_citations_data_use_articles=log(log_citations_data_use_articles))
 
 p1 <- ggplot(reg_df_fixedn, aes(y=data_papers, x=NY.GDP.PCAP.PP.KD)) +
   geom_point() +
@@ -989,13 +1032,16 @@ p3
 
 models <- list(
 
-  '(1)'=feols(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn, se='hetero'),
-  '(2)'=feols(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn, se='hetero'),
-  '(3)'=feols(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn, se='hetero'),
-  '(4)'=feols(log(data_papers) ~   SPI.INDEX.PIL4  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn, se='hetero')
+  'Any Article Using Data'=lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn),
+  'Articles Using Data Published in Top 500 journals by Impact Factor'=lm(log_data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn), #poisson regression used because logging the top 200 drops several countries with counts of 0
+  'Citation Count of Articles Using Data'=lm(log_citations_data_use_articles ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL),  data=reg_df_fixedn),
+  'Any Article Using Data'=lm(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn),
+  ' Any Article Using Data'=lm(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn),
+  ' Any Article Using Data'=lm(log(data_papers) ~   SPI.INDEX.PIL4  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn)
   )
 
 modelsummary(models,
+             vcov='robust',
              estimate= "{estimate}{stars}",
              coef_rename = c("SPI.INDEX" = "SPI Overall Score",
                              "SPI.INDEX.PIL1" = "SPI Data Use Score",
@@ -1766,6 +1812,7 @@ models <- list(
 
   'Any Article Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , family="poisson", data=reg_df_fixedn),
   'Articles Using Data Published in Top 100 journals by Impact Factor'=glm(data_papers_top100 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), family="poisson" , data=reg_df_fixedn),
+  'Articles Using Data Published in Top 200 journals by Impact Factor'=glm(data_papers_top200 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), family="poisson" , data=reg_df_fixedn),
   'Articles Using Data Published in Top 500 journals by Impact Factor'=glm(data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), family="poisson" , data=reg_df_fixedn),
     'Articles Using Data Published Journals with Impact Factor >=2'=glm(data_papers_impact ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), family="poisson" , data=reg_df_fixedn),
   'Citation Count of Articles Using Data'=glm(citations_data_use_articles ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), family="poisson" , data=reg_df_fixedn)
