@@ -346,6 +346,66 @@ citations_year_country_df <- citations_year_country_df %>%
   mutate(citations_data_use_articles_estimate=citations_data_use_articles/article_share,
          citations_data_use_articles_estimate_3yr=rollmean(citations_data_use_articles_estimate, k=3, align='left', fill=NA))
 
+
+#get number of articles using data by country and impact factor group.
+#Articles are grouped into impact factors groups from 0 to 15+ by increments of 0.25
+journal_impact <- journal_list %>%
+  #create a column that puts journals into incremental groups
+  mutate(
+    `Cites / Doc. (2years)`=if_else(is.na(`Cites / Doc. (2years)`),0,`Cites / Doc. (2years)`),
+    impact_group=cut_interval(`Cites / Doc. (2years)`, length=0.5),
+    #turn into numeric value equal to upper part of interval
+    impact_group=str_remove_all(impact_group, "[\\[\\]]"),
+    #keep just the number before the comma
+    impact_group=str_remove_all(impact_group, ",.*"),
+    #remove parenthesis
+    impact_group=str_remove_all(impact_group, "\\("),
+    impact_group=as.numeric(impact_group)
+  )
+
+articles_year_journal_df <- articles_year_df %>%
+  left_join(journal_impact %>%
+                arrange(desc(`Cites / Doc. (2years)`)) %>%
+              #keep top 100
+              filter(`Cites / Doc. (2years)`>0)) 
+
+articles_data_use_year_impact_df <- articles_year_journal_df[data_use=="Yes",lapply(.SD, sum, na.rm=TRUE), by=c('year','impact_group'), .SDcols=countries_list]
+
+#pivot longer
+articles_data_use_year_impact_df <- articles_data_use_year_impact_df %>% 
+  complete(year, impact_group) %>%
+  #replace missing values with 0
+  mutate(across(countries_list, ~if_else(is.na(.),0,.))) %>%
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='data_papers'
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) %>%  
+  mutate(data_papers_estimate=data_papers/article_share,
+         data_papers_estimate_3yr=rollmean(data_papers_estimate, k=3, align='left', fill=NA),
+         data_papers_3yr=rollmean(data_papers, k=3, align='left', fill=NA))
+
+#get just recent articles
+country_scores_recent_impact_df <- articles_data_use_year_impact_df %>%
+  filter(!is.na(country)) %>%
+  rename(date=year) %>%
+  filter(between(date,paper_lower_year, 2019)) %>%
+  group_by(iso3c, region, income_level, lending_type, impact_group) %>%
+  summarise(
+            data_papers=sum(data_papers, na.rm=T),
+            data_papers_estimate=sum(data_papers_estimate, na.rm=T)) %>%
+  mutate(date=2019) %>%
+  left_join(correlates_df) %>%
+  ungroup() %>%
+  mutate(data_papers_pcap=1000000*data_papers/SP.POP.TOTL) %>%
+  select(country, iso3c, date, region, income_level, lending_type, everything())
+
+
 #get number of articles using data by country and subject
 articles_data_use_year_subject_df <- articles_year_df[data_use=="Yes",lapply(.SD, sum, na.rm=TRUE), by=c('year','group_name'), .SDcols=countries_list]
 
@@ -1043,37 +1103,39 @@ models <- list(
 modelsummary(models,
              vcov='robust',
              estimate= "{estimate}{stars}",
-             coef_rename = c("SPI.INDEX" = "SPI Overall Score",
-                             "SPI.INDEX.PIL1" = "SPI Data Use Score",
-                             "SPI.INDEX.PIL2" = "SPI Data Services Score",
-                             "SPI.INDEX.PIL3" = "SPI Data Products Score",
-                             "SPI.INDEX.PIL4" = "SPI Data Sources Score",
-                             "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
-                             "log(NY.GDP.MKTP.PP.KD)" = "Log GDP",
-                             "log(NY.GDP.PCAP.PP.KD)" = "Log GDP per capita",
-                             "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
-                             "log(qual_papers+1)" = "Log Number of Qualitative Papers",
-                             "region"="Region",
-                             "log(SP.POP.TOTL)"="Log Population",
-                             "log(poverty_surveys)" = 'Log # of Poverty Surveys',
-                             "SG.LAW.INDX" = "Women Business and the Law Index Score (scale 1-100)",
-                             "gii"="Gender Inequality Index",
-                             "sigi"="Social Institutions and Gender Index",
-                             "NV.IND.MANF.ZS"  = "Manufacturing value added (% of GDP)",
-                              "NV.AGR.TOTL.ZS"= "Agriculture, forestry, fishing value added (% of GDP)",
-                              "BN.CAB.XOKA.GD.ZS"= "Current account balance (% of GDP)",
-                              "HD.HCI.OVRL" = "Human Capital Index (0-1 scale)",
-                              "SE.PRM.ENRR" = "School Enrollment, Primary (% gross)" ,
-                             "SE.TER.ENRR" = "School Enrollment, Tertiary (% gross)" ,
-                              "NE.TRD.GNFS.ZS" = "Trade (% of GDP)",
-                              "WGI.OVL" = "WGI Index",
-                              "CC.EST" = "WGI: Control of Corruption: Estimate",
-                              "GE.EST" = "WGI: Governance Effectiveness: Estimate",
-                              "PV.EST" = "WGI: Political Stability and Absence of Violence/Terrorism: Estimate",
-                              "RQ.EST" = "WGI: Regulatory Quality: Estimate",
-                              "RL.EST" = "WGI: Rule of Law: Estimate",
-                              "VA.EST" = "WGI: Voice and Accountability: Estimate"
-                             ),
+             # coef_map = c(
+             #                 "log(NY.GDP.MKTP.PP.KD)" = "Log GDP",
+             #                 "log(NY.GDP.PCAP.PP.KD)" = "Log GDP per capita",
+             #                 "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
+             #                 "log(SP.POP.TOTL)"="Log Population",
+             #                 "log(qual_papers + 1)" = "Log Qualitative Papers",
+             #                 "region"="Region",
+             #                 "SPI.INDEX" = "SPI Overall Score",
+             #                 "SPI.INDEX.PIL1" = "SPI Data Use Score",
+             #                 "SPI.INDEX.PIL2" = "SPI Data Services Score",
+             #                 "SPI.INDEX.PIL3" = "SPI Data Products Score",
+             #                 "SPI.INDEX.PIL4" = "SPI Data Sources Score",
+             #                 "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
+             #                 "log(poverty_surveys)" = 'Log # of Poverty Surveys',
+             #                 "SG.LAW.INDX" = "Women Business and the Law Index Score (scale 1-100)",
+             #                 "gii"="Gender Inequality Index",
+             #                 "sigi"="Social Institutions and Gender Index",
+             #                 "NV.IND.MANF.ZS"  = "Manufacturing value added (% of GDP)",
+             #                  "NV.AGR.TOTL.ZS"= "Agriculture, forestry, fishing value added (% of GDP)",
+             #                  "BN.CAB.XOKA.GD.ZS"= "Current account balance (% of GDP)",
+             #                  "HD.HCI.OVRL" = "Human Capital Index (0-1 scale)",
+             #                  "SE.PRM.ENRR" = "School Enrollment, Primary (% gross)" ,
+             #                 "SE.TER.ENRR" = "School Enrollment, Tertiary (% gross)" ,
+             #                  "NE.TRD.GNFS.ZS" = "Trade (% of GDP)",
+             #                  "WGI.OVL" = "WGI Index",
+             #                  "CC.EST" = "WGI: Control of Corruption: Estimate",
+             #                  "GE.EST" = "WGI: Governance Effectiveness: Estimate",
+             #                  "PV.EST" = "WGI: Political Stability and Absence of Violence/Terrorism: Estimate",
+             #                  "RQ.EST" = "WGI: Regulatory Quality: Estimate",
+             #                  "RL.EST" = "WGI: Rule of Law: Estimate",
+             #                  "VA.EST" = "WGI: Voice and Accountability: Estimate",
+             #                 "(Intercept)" = "(Intercept)"
+             #                 ),
              notes="Data from the World Bank's World Development Indicators (WDI) and SPI.  WDI series codes include NY.GDP.PCAP.PP.KD, SP.POP.TOTL, IQ.SPI.OVRL,IQ.SPI.PIL1,IQ.SPI.PIL2, IQ.SPI.PIL3, IQ.SPI.PIL4, IQ.SPI.PIL5.  Papers include all papers using data years 2000-2020.
               ***=0.001 level
               **=0.01 level
