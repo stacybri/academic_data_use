@@ -92,6 +92,7 @@ articles_year_df <- read_fst(paste0(raw_data,'/results_completed_updated_2023100
   # arrange columns so that "paper_id" "title" "abstract"   "year" "doi" "venue" "journal"  "mag_field_of_study"  "group_name" "data_use" "outbound_citations" "inbound_citations "places"   "countries" come first then everything
   select(paper_id, title, abstract, year, doi, venue, journal, mag_field_of_study, outbound_citations, inbound_citations, group_name, data_use, places, countries, everything())
 
+
 #code is commented out as to save time in computation. It is used to generate the journal rankings.
 # #get list of journals
 # journal_list <- articles_year_df %>%
@@ -525,6 +526,119 @@ country_scores_recent_df <- country_scores_annual_df %>%
 
 
 ```
+
+```{r}
+#reshape the article data to long format. Each row is an article-country observations, rather than an article observations
+articles_year_df_impact <- articles_year_df %>%
+  left_join(journal_list %>%
+                arrange(desc(`Cites / Doc. (2years)`))) %>% 
+  #replace missing values with 0
+  mutate(across(`Cites / Doc. (2years)`, ~if_else(is.na(.),0,.))) 
+# Convert to data.table
+articles_year_dt <- as.data.table(articles_year_df_impact)
+
+# Melt the data.table
+articles_year_dt_long <- melt(articles_year_dt, 
+                              id.vars = c("paper_id","title", 'abstract', "year", 'Cites / Doc. (2years)', 'venue','journal','group_name'), 
+                              measure.vars = colnames(articles_year_dt)[16:263], 
+                              variable.name = "iso3c", 
+                              value.name = "country_ind")
+
+# Filter the rows where country_ind == 1
+articles_year_dt_long <- articles_year_dt_long[country_ind == 1]
+
+# Optionally, convert back to data.frame if needed
+articles_year_df_long <- as.data.frame(articles_year_dt_long)
+
+#join with correlates_df
+articles_year_df_long <- articles_year_df_long %>%
+  rename(date=year) %>%
+  left_join(correlates_df) %>%
+  filter(!is.na(country)) %>%
+  select(-country)
+
+
+
+```
+
+```{r}
+
+journal_impact <- journal_list %>%
+  #create a column that puts journals into incremental groups
+  mutate(
+    `Cites / Doc. (2years)`=if_else(is.na(`Cites / Doc. (2years)`),0,`Cites / Doc. (2years)`)
+
+  )
+
+journal_impact_positive <- journal_impact %>%
+  filter(`Cites / Doc. (2years)`>0)
+
+
+#get quintiles of journal impact
+impact_quintiles <- quantile(journal_impact_positive$`Cites / Doc. (2years)`, probs=seq(0,1,0.2))
+
+#form quintile groups based on estimates
+journal_impact <- journal_impact %>%
+  mutate(
+    impact_quintiles=case_when(
+      `Cites / Doc. (2years)`<=impact_quintiles[2] ~ 1,
+      `Cites / Doc. (2years)`<=impact_quintiles[3] ~ 2,
+      `Cites / Doc. (2years)`<=impact_quintiles[4] ~ 3,
+      `Cites / Doc. (2years)`<=impact_quintiles[5] ~ 4,
+      TRUE ~ 5
+    )
+      
+    )
+
+  
+
+articles_year_journal_df <- articles_year_df %>%
+  left_join(journal_impact %>%
+                arrange(desc(`Cites / Doc. (2years)`)) ) %>%
+  mutate(impact_quintiles=if_else(is.na(impact_quintiles),0,impact_quintiles)) 
+
+
+
+articles_data_use_year_impact_df <- articles_year_journal_df[data_use=="Yes",lapply(.SD, sum, na.rm=TRUE), by=c('year','impact_quintiles'), .SDcols=countries_list]
+
+#pivot longer
+articles_data_use_year_impact_df <- articles_data_use_year_impact_df %>% 
+  complete(year, impact_quintiles) %>%
+  #replace missing values with 0
+  mutate(across(countries_list, ~if_else(is.na(.),0,.))) %>%
+  as_tibble() %>%
+  pivot_longer(
+    cols=countries_list,
+    names_to = 'iso3c',
+    values_to='data_papers'
+  ) %>%
+  left_join(country_metadata) %>%
+  filter(!is.na(country)) %>%
+  group_by(iso3c) %>%
+  arrange(desc(year)) %>%  
+  mutate(data_papers_estimate=data_papers/article_share,
+         data_papers_estimate_3yr=rollmean(data_papers_estimate, k=3, align='left', fill=NA),
+         data_papers_3yr=rollmean(data_papers, k=3, align='left', fill=NA)) %>%
+  filter(between(year,paper_lower_year, 2019)) %>%
+  group_by(iso3c, region, income_level, lending_type, impact_quintiles) %>%
+  summarise(
+            data_papers=sum(data_papers, na.rm=T),
+            data_papers_estimate=sum(data_papers_estimate, na.rm=T)) %>%
+  mutate(date=2019) %>%
+  left_join(correlates_df) %>%
+  ungroup() %>%
+  mutate(data_papers_pcap=1000000*data_papers/SP.POP.TOTL) %>%
+  select(country, iso3c, date, region, income_level, lending_type, everything()) %>%
+  filter(!(is.na(NY.GDP.PCAP.PP.KD) | is.na(SP.POP.TOTL) | is.na(SPI.INDEX))) %>%
+  mutate(
+    log_data_papers=log(if_else(data_papers==0,0.05,data_papers))
+  ) %>%
+  mutate(impact_quintiles=if_else(is.na(impact_quintiles),0,impact_quintiles)) 
+
+```
+
+
+
 
 ```{r mturkdata, include=FALSE}
 
@@ -1086,56 +1200,75 @@ p3
 
 ## Table 2. Relationships between Number of Papers Using Data and Statistical Performance
 
+
+
+
 ```{r}
+
 
 
 
 models <- list(
 
   'Any Article Using Data'=lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn),
-  'Articles Using Data Published in Top 500 journals by Impact Factor'=lm(log_data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn), #poisson regression used because logging the top 200 drops several countries with counts of 0
+  'Articles Using Data Published in Top 500 journals by Impact Factor'=lm(log_data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn), 
   'Citation Count of Articles Using Data'=lm(log_citations_data_use_articles ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL),  data=reg_df_fixedn),
+  'Any Article Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(NY.GDP.PCAP.PP.KD):impact_quintiles + factor(impact_quintiles) + log(SP.POP.TOTL) , data=articles_data_use_year_impact_df %>% filter(impact_quintiles>0), family='poisson' ),  #poisson regression used because logging drops several countries with counts of 0
+  # 'Journal Impact Factor'=lm(log(`Cites / Doc. (2years)`) ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + factor(group_name),  data=articles_year_df_long %>% filter(`Cites / Doc. (2years)`>0)),
   'Any Article Using Data'=lm(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn),
   ' Any Article Using Data'=lm(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn),
   ' Any Article Using Data'=lm(log(data_papers) ~   SPI.INDEX.PIL4  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn)
+
   )
 
 modelsummary(models,
              vcov='robust',
              estimate= "{estimate}{stars}",
-             # coef_map = c(
-             #                 "log(NY.GDP.MKTP.PP.KD)" = "Log GDP",
-             #                 "log(NY.GDP.PCAP.PP.KD)" = "Log GDP per capita",
-             #                 "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
-             #                 "log(SP.POP.TOTL)"="Log Population",
-             #                 "log(qual_papers + 1)" = "Log Qualitative Papers",
-             #                 "region"="Region",
-             #                 "SPI.INDEX" = "SPI Overall Score",
-             #                 "SPI.INDEX.PIL1" = "SPI Data Use Score",
-             #                 "SPI.INDEX.PIL2" = "SPI Data Services Score",
-             #                 "SPI.INDEX.PIL3" = "SPI Data Products Score",
-             #                 "SPI.INDEX.PIL4" = "SPI Data Sources Score",
-             #                 "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
-             #                 "log(poverty_surveys)" = 'Log # of Poverty Surveys',
-             #                 "SG.LAW.INDX" = "Women Business and the Law Index Score (scale 1-100)",
-             #                 "gii"="Gender Inequality Index",
-             #                 "sigi"="Social Institutions and Gender Index",
-             #                 "NV.IND.MANF.ZS"  = "Manufacturing value added (% of GDP)",
-             #                  "NV.AGR.TOTL.ZS"= "Agriculture, forestry, fishing value added (% of GDP)",
-             #                  "BN.CAB.XOKA.GD.ZS"= "Current account balance (% of GDP)",
-             #                  "HD.HCI.OVRL" = "Human Capital Index (0-1 scale)",
-             #                  "SE.PRM.ENRR" = "School Enrollment, Primary (% gross)" ,
-             #                 "SE.TER.ENRR" = "School Enrollment, Tertiary (% gross)" ,
-             #                  "NE.TRD.GNFS.ZS" = "Trade (% of GDP)",
-             #                  "WGI.OVL" = "WGI Index",
-             #                  "CC.EST" = "WGI: Control of Corruption: Estimate",
-             #                  "GE.EST" = "WGI: Governance Effectiveness: Estimate",
-             #                  "PV.EST" = "WGI: Political Stability and Absence of Violence/Terrorism: Estimate",
-             #                  "RQ.EST" = "WGI: Regulatory Quality: Estimate",
-             #                  "RL.EST" = "WGI: Rule of Law: Estimate",
-             #                  "VA.EST" = "WGI: Voice and Accountability: Estimate",
-             #                 "(Intercept)" = "(Intercept)"
-             #                 ),
+             coef_map = c(
+                             "log(NY.GDP.MKTP.PP.KD)" = "Log GDP",
+                             "log(NY.GDP.PCAP.PP.KD)" = "Log GDP per capita",
+                             'log(NY.GDP.PCAP.PP.KD):impact_quintiles' = 'Log GDP per capita X Impact Factor',
+                             "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
+                             "log(SP.POP.TOTL)"="Log Population",
+                             "log(qual_papers + 1)" = "Log Qualitative Papers",
+                             "region"="Region",
+                             "SPI.INDEX" = "SPI Overall Score",
+                             "SPI.INDEX.PIL1" = "SPI Data Use Score",
+                             "SPI.INDEX.PIL2" = "SPI Data Services Score",
+                             "SPI.INDEX.PIL3" = "SPI Data Products Score",
+                             "SPI.INDEX.PIL4" = "SPI Data Sources Score",
+                             "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
+                             "log(poverty_surveys)" = 'Log # of Poverty Surveys',
+                             "SG.LAW.INDX" = "Women Business and the Law Index Score (scale 1-100)",
+                             "gii"="Gender Inequality Index",
+                             "sigi"="Social Institutions and Gender Index",
+                             "NV.IND.MANF.ZS"  = "Manufacturing value added (% of GDP)",
+                              "NV.AGR.TOTL.ZS"= "Agriculture, forestry, fishing value added (% of GDP)",
+                              "BN.CAB.XOKA.GD.ZS"= "Current account balance (% of GDP)",
+                              "HD.HCI.OVRL" = "Human Capital Index (0-1 scale)",
+                              "SE.PRM.ENRR" = "School Enrollment, Primary (% gross)" ,
+                             "SE.TER.ENRR" = "School Enrollment, Tertiary (% gross)" ,
+                              "NE.TRD.GNFS.ZS" = "Trade (% of GDP)",
+                              "WGI.OVL" = "WGI Index",
+                              "CC.EST" = "WGI: Control of Corruption: Estimate",
+                              "GE.EST" = "WGI: Governance Effectiveness: Estimate",
+                              "PV.EST" = "WGI: Political Stability and Absence of Violence/Terrorism: Estimate",
+                              "RQ.EST" = "WGI: Regulatory Quality: Estimate",
+                              "RL.EST" = "WGI: Rule of Law: Estimate",
+                              "VA.EST" = "WGI: Voice and Accountability: Estimate",
+                             "(Intercept)" = "(Intercept)",
+                             "factor(group_name)Economics" = "Economics",
+                             'factor(group_name)Medicine' = 'Medicine',
+                             'factor(group_name)Political Science'='Political Science',
+                             'factor(group_name)Psychology'='Psychology',
+                             'factor(group_name)Sociology' = 'Sociology',
+                             'log(NY.GDP.PCAP.PP.KD):factor(impact_quintiles)1' = "Log GDP per capita X Impact Factor Quintile 1",
+                             'log(NY.GDP.PCAP.PP.KD):factor(impact_quintiles)2' = "Log GDP per capita X Impact Factor Quintile 2",
+                             'log(NY.GDP.PCAP.PP.KD):factor(impact_quintiles)3' = "Log GDP per capita X Impact Factor Quintile 3",
+                             'log(NY.GDP.PCAP.PP.KD):factor(impact_quintiles)4' = "Log GDP per capita X Impact Factor Quintile 4",
+                             'log(NY.GDP.PCAP.PP.KD):factor(impact_quintiles)5' = "Log GDP per capita X Impact Factor Quintile 5"
+                             
+                             ),
              notes="Data from the World Bank's World Development Indicators (WDI) and SPI.  WDI series codes include NY.GDP.PCAP.PP.KD, SP.POP.TOTL, IQ.SPI.OVRL,IQ.SPI.PIL1,IQ.SPI.PIL2, IQ.SPI.PIL3, IQ.SPI.PIL4, IQ.SPI.PIL5.  Papers include all papers using data years 2000-2020.
               ***=0.001 level
               **=0.01 level
@@ -1147,6 +1280,74 @@ modelsummary(models,
              )
 
 ```
+
+```{r}
+# test for differences using bootstrapping
+library(boot)
+
+# Define the models
+models <- list(
+  'Any Article Using Data' = lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), data = reg_df_fixedn),
+  'Articles Using Data Published in Top 500 journals by Impact Factor' = lm(log_data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), data = reg_df_fixedn)
+)
+
+# Function to fit models and extract coefficients
+fit_models1 <- function(data, indices) {
+  # Resample the data
+  d <- data[indices, ]
+  
+  # Fit the models
+  model1 <- lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), data = d)
+  model2 <- lm(log_data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), data = d)
+  # Extract coefficients
+  coef1 <- coef(model1)
+  coef2 <- coef(model2)
+  
+  # Return the difference in coefficients
+  return(coef2-coef1 )
+}
+fit_models2 <- function(data, indices) {
+  # Resample the data
+  d <- data[indices, ]
+  
+  # Fit the models
+  model1 <- lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL), data = d)
+  model2 <- lm(log_citations_data_use_articles ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL),  data= d)
+  # Extract coefficients
+  coef1 <- coef(model1)
+  coef2 <- coef(model2)
+  
+  # Return the difference in coefficients
+  return(coef2-coef1 )
+}
+
+# Perform bootstrap resampling
+set.seed(123) # For reproducibility
+results1 <- boot(data = reg_df_fixedn, statistic = fit_models1, R = 1000)
+results2 <- boot(data = reg_df_fixedn, statistic = fit_models2, R = 1000)
+# Print the results
+print(results1)
+print(results2)
+# Plot the bootstrap distributions
+plot(results1)
+plot(results2)
+```
+
+```{r}
+#calculate R squared and adjusted rsqured from glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(NY.GDP.PCAP.PP.KD):impact_quintiles + factor(impact_quintiles) + log(SP.POP.TOTL) , data=articles_data_use_year_impact_df %>% filter(impact_quintiles>0), family='poisson' )
+
+#poisson regression used because logging drops several countries with counts of 0
+
+#calculate Rsquared
+model <- glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(NY.GDP.PCAP.PP.KD):impact_quintiles + factor(impact_quintiles) + log(SP.POP.TOTL) , data=articles_data_use_year_impact_df %>% filter(impact_quintiles>0), family='poisson' )
+
+#calculate Rsquared
+rsq <- 1 - model$deviance / model$null.deviance
+adjusted_rsq <- 1 - (1 - rsq) * (nrow(articles_data_use_year_impact_df %>% filter(impact_quintiles>0)) - 1) / (nrow(articles_data_use_year_impact_df %>% filter(impact_quintiles>0)) - ncol(articles_data_use_year_impact_df %>% filter(impact_quintiles>0)) - 1)
+
+```
+
+
 
 
 
