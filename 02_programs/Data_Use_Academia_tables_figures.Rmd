@@ -1200,7 +1200,60 @@ p3
 
 ## Table 2. Relationships between Number of Papers Using Data and Statistical Performance
 
-
+```{r}
+# Create stacked dataset with two observations per country
+stacked_df <- rbind(
+  # All papers using data
+  country_scores_recent_df %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, data_papers_top500) %>%
+    mutate(
+      papers = data_papers,
+      weighted_dummy = 0,
+      type = "All Articles"
+    ),
+  
+  # Top 500 papers only
+  country_scores_recent_df %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, data_papers_top500) %>%
+    mutate(
+      papers = data_papers_top500,
+      weighted_500_dummy = 1,
+      type = "Top 500 Articles"
+    ),
+  # Top 200 papers only
+  country_scores_recent_df %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, data_papers_top200) %>%
+    mutate(
+      papers = data_papers_top200,
+      weighted_200_dummy = 1,
+      type = "Top 200 Articles"
+    ),
+    # Top 100 papers only
+  country_scores_recent_df %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, data_papers_top100) %>%
+    mutate(
+      papers = data_papers_top100,
+      weighted_100_dummy = 1,
+      type = "Top 100 Articles"
+    ),
+    #citation count of articles using data
+  country_scores_recent_df %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, citations_data_use_articles) %>%
+    mutate(
+      papers = citations_data_use_articles,
+      weighted_citation_dummy = 1,
+      type = "Citation Count of Articles Using Data"
+    )
+  
+) %>%
+  # Handle zero values for log transformation
+  mutate(
+    log_papers = log(ifelse(papers == 0, 0.05, papers)),
+    log_gdp = log(NY.GDP.PCAP.PP.KD),
+    log_pop = log(SP.POP.TOTL)
+  ) %>%
+  filter(!is.na(log_gdp) & !is.na(log_pop))
+```
 
 
 ```{r}
@@ -1211,6 +1264,13 @@ p3
 models <- list(
 
   'Any Article Using Data'=lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn),
+  'Stacked Articles Using Data'=lm(log_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
+      weighted_500_dummy + log_gdp:weighted_500_dummy +
+      weighted_200_dummy + log_gdp:weighted_200_dummy +
+      weighted_100_dummy + log_gdp:weighted_100_dummy +
+      weighted_citation_dummy + log_gdp:weighted_citation_dummy 
+      ,
+      data=stacked_df),
   'Articles Using Data Published in Top 500 journals by Impact Factor'=lm(log_data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn), 
   'Citation Count of Articles Using Data'=lm(log_citations_data_use_articles ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL),  data=reg_df_fixedn),
   'Any Article Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(NY.GDP.PCAP.PP.KD):impact_quintiles + factor(impact_quintiles) + log(SP.POP.TOTL) , data=articles_data_use_year_impact_df %>% filter(impact_quintiles>0), family='poisson' ),  #poisson regression used because logging drops several countries with counts of 0
@@ -1230,6 +1290,14 @@ modelsummary(models,
                              'log(NY.GDP.PCAP.PP.KD):impact_quintiles' = 'Log GDP per capita X Impact Factor',
                              "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
                              "log(SP.POP.TOTL)"="Log Population",
+                              "weighted_500_dummy:log_gdp" = "Log GDP X Top 500 Articles",
+                              "weighted_200_dummy:log_gdp" = "Log GDP X Top 200 Articles",
+                              "weighted_100_dummy:log_gdp" = "Log GDP X Top 100 Articles",
+                              "weighted_citation_dummy:log_gdp" = "Log GDP X Citation Count of Articles Using Data", 
+                              "weighted_500_dummy" = "Top 500 Articles",
+                              "weighted_200_dummy" = "Top 200 Articles",
+                              "weighted_100_dummy" = "Top 100 Articles",
+                              "weighted_citation_dummy" = "Citation Count of Articles Using Data",
                              "log(qual_papers + 1)" = "Log Qualitative Papers",
                              "region"="Region",
                              "SPI.INDEX" = "SPI Overall Score",
