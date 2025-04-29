@@ -42,6 +42,7 @@ library(fixest)
 library(GGally)
 library(stringdist)
 library(fuzzyjoin)
+library(tidylog)
 set.seed(354623)
 
 #set paths
@@ -141,6 +142,17 @@ journal_list <- read_csv(paste0(raw_data,'/journal_list.csv'))
   
 #read in indicators from the WDI for regression analysis
 correlates_df <- read_csv(paste0(raw_data, "/correlates_df.csv"))
+
+#read in english language data. Data come from CIA factbook.
+english_df <- read_csv(here('01_raw_data','misc','official_language_cia_factbook_20250424.csv')) %>%
+  select(iso3c, 
+         official_language, #english is official language
+         english_speaking #english spoken by at least 50% of population
+         ) 
+
+#join with correlates
+correlates_df <- correlates_df %>%
+  left_join(english_df) 
 
 #get a list of the columns names in the file
 countries_list <- colnames(articles_year_df[,16:263])
@@ -1205,7 +1217,7 @@ p3
 stacked_df <- bind_rows(
   # All papers using data
   country_scores_recent_df %>%
-    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, data_papers_top500) %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, official_language, english_speaking, data_papers, data_papers_top500) %>%
     mutate(
       data_papers = data_papers,
       weighted_dummy = 0,
@@ -1214,7 +1226,7 @@ stacked_df <- bind_rows(
   
   # Top 500 papers only
   country_scores_recent_df %>%
-    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, data_papers_top500) %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, official_language, english_speaking, data_papers, data_papers_top500) %>%
     mutate(
       data_papers = data_papers_top500,
       weighted_500_dummy = 1,
@@ -1222,7 +1234,7 @@ stacked_df <- bind_rows(
     ),
   # Top 200 papers only
   country_scores_recent_df %>%
-    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, data_papers_top200) %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, official_language, english_speaking, data_papers, data_papers_top200) %>%
     mutate(
       data_papers = data_papers_top200,
       weighted_200_dummy = 1,
@@ -1230,7 +1242,7 @@ stacked_df <- bind_rows(
     ),
     # Top 100 papers only
   country_scores_recent_df %>%
-    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, data_papers_top100) %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, official_language, english_speaking, data_papers, data_papers_top100) %>%
     mutate(
       data_papers = data_papers_top100,
       weighted_100_dummy = 1,
@@ -1238,7 +1250,7 @@ stacked_df <- bind_rows(
     ),
     #citation count of articles using data
   country_scores_recent_df %>%
-    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, data_papers, citations_data_use_articles) %>%
+    select(iso3c, country, region, income_level, NY.GDP.PCAP.PP.KD, SP.POP.TOTL, official_language, english_speaking, data_papers, citations_data_use_articles) %>%
     mutate(
       data_papers = citations_data_use_articles,
       weighted_citation_dummy = 1,
@@ -1248,7 +1260,7 @@ stacked_df <- bind_rows(
 ) %>%
   # Handle zero values for log transformation
   mutate(
-    log_papers = log(ifelse(data_papers == 0, 0.05, data_papers)),
+    log_papers = log(ifelse(data_papers == 0, 0.02, data_papers)),
     log_gdp = log(NY.GDP.PCAP.PP.KD),
     log_pop = log(SP.POP.TOTL),
     #set dummy to 0 if missing
@@ -1269,57 +1281,67 @@ stacked_df <- bind_rows(
 
 models <- list(
 
-  'Any Article Using Data'=lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn),
-  'Stacked Articles Using Data'=lm(log_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
-      weighted_500_dummy + log_gdp:weighted_500_dummy + log_pop:weighted_500_dummy,
-      data=stacked_df %>% filter(type %in% c("All Articles", "Top 500 Articles"))),
-  'Stacked Articles Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
-      weighted_500_dummy + log_gdp:weighted_500_dummy + log_pop:weighted_500_dummy,
-      data=stacked_df %>% filter(type %in% c("All Articles", "Top 500 Articles")), family='poisson'),
-  'Stacked Articles Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
-      weighted_200_dummy + log_gdp:weighted_200_dummy + log_pop:weighted_200_dummy,
-      data=stacked_df %>% filter(type %in% c("All Articles", "Top 200 Articles")), family='poisson'),
-  'Stacked Articles Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
-      weighted_100_dummy + log_gdp:weighted_100_dummy + log_pop:weighted_100_dummy,
-      data=stacked_df%>% filter(type %in% c("All Articles", "Top 100 Articles")), family='poisson'),
-  'Stacked Articles Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
-      weighted_citation_dummy + log_gdp:weighted_citation_dummy  + log_pop:weighted_citation_dummy ,
-      data=stacked_df %>% filter(type %in% c("All Articles", "Citation Count of Articles Using Data")), family='poisson'),
-  'Articles Using Data Published in Top 500 journals by Impact Factor'=lm(log_data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn), 
-  'Citation Count of Articles Using Data'=lm(log_citations_data_use_articles ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL),  data=reg_df_fixedn),
+  'Any Article Using Data'=lm(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + official_language , data=reg_df_fixedn),
+  'Any Article Using Data - Poisson'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + official_language , data=reg_df_fixedn, family='poisson'),
+  'Any Article Using Data - Poisson'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + official_language + 
+        weighted_500_dummy + log_gdp:weighted_500_dummy + log_pop:weighted_500_dummy + official_language:weighted_500_dummy +
+        weighted_200_dummy + log_gdp:weighted_200_dummy + log_pop:weighted_200_dummy + official_language:weighted_200_dummy +
+        weighted_100_dummy + log_gdp:weighted_100_dummy + log_pop:weighted_100_dummy + official_language:weighted_100_dummy +
+        weighted_citation_dummy + log_gdp:weighted_citation_dummy + log_pop:weighted_citation_dummy + official_language:weighted_citation_dummy,
+      data=stacked_df, family='poisson'),
+  # 'Stacked Articles Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
+  #     weighted_500_dummy + log_gdp:weighted_500_dummy + log_pop:weighted_500_dummy  + official_language + official_language:weighted_500_dummy,
+  #     data=stacked_df %>% filter(type %in% c("All Articles", "Top 500 Articles")), family='poisson'),
+  # 'Stacked Articles Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
+  #     weighted_200_dummy + log_gdp:weighted_200_dummy + log_pop:weighted_200_dummy  + official_language + official_language:weighted_200_dummy,
+  #     data=stacked_df %>% filter(type %in% c("All Articles", "Top 200 Articles")), family='poisson'),
+  # 'Stacked Articles Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
+  #     weighted_100_dummy + log_gdp:weighted_100_dummy + log_pop:weighted_100_dummy  + official_language + official_language:weighted_100_dummy,
+  #     data=stacked_df%>% filter(type %in% c("All Articles", "Top 100 Articles")), family='poisson'),
+  # 'Stacked Articles Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + 
+  #     weighted_citation_dummy + log_gdp:weighted_citation_dummy  + log_pop:weighted_citation_dummy  + official_language + official_language:weighted_citation_dummy,
+  #     data=stacked_df %>% filter(type %in% c("All Articles", "Citation Count of Articles Using Data")), family='poisson'),
+  # 'Articles Using Data Published in Top 500 journals by Impact Factor'=lm(log_data_papers_top500 ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + official_language , data=reg_df_fixedn), 
+  # 'Citation Count of Articles Using Data'=lm(log_citations_data_use_articles ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + official_language,  data=reg_df_fixedn),
   'Any Article Using Data'=glm(data_papers ~ log(NY.GDP.PCAP.PP.KD) + log(NY.GDP.PCAP.PP.KD):impact_quintiles + factor(impact_quintiles) + log(SP.POP.TOTL) , data=articles_data_use_year_impact_df %>% filter(impact_quintiles>0), family='poisson' ),  #poisson regression used because logging drops several countries with counts of 0
   # 'Journal Impact Factor'=lm(log(`Cites / Doc. (2years)`) ~   log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + factor(group_name),  data=articles_year_df_long %>% filter(`Cites / Doc. (2years)`>0)),
-  'Any Article Using Data'=lm(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) , data=reg_df_fixedn),
-  ' Any Article Using Data'=lm(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn),
-  ' Any Article Using Data'=lm(log(data_papers) ~   SPI.INDEX.PIL4  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn)
+  'Any Article Using Data'=lm(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL)  + official_language + official_language, data=reg_df_fixedn),
+  ' Any Article Using Data'=lm(log(data_papers) ~ SPI.INDEX + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL)  + official_language + log(qual_papers+1) , data=reg_df_fixedn),
+  ' Any Article Using Data'=lm(log(data_papers) ~   SPI.INDEX.PIL4  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL)  + official_language +  log(qual_papers+1) , data=reg_df_fixedn )
 
   )
 
 modelsummary(models,
-             vcov='robust',
+             vcov='HC0',
              estimate= "{estimate}{stars}",
              coef_map = c(
                              "log(NY.GDP.MKTP.PP.KD)" = "Log GDP",
                              "log(NY.GDP.PCAP.PP.KD)" = "Log GDP per capita",
-                             'log(NY.GDP.PCAP.PP.KD):impact_quintiles' = 'Log GDP per capita X Impact Factor',
                              "log(NY.GDP.PCAP.PP.CD^2)" = "Log GDP",
                              "log(SP.POP.TOTL)"="Log Population",
-                              "weighted_500_dummy:log_gdp" = "Log GDP X Top 500 Articles",
+                             "official_language" = "Country Official Language is English",
+                             "english_speaking" = "English Speaking",
+                             "weighted_500_dummy:log_gdp" = "Log GDP X Top 500 Articles",
+                              "log_gdp:weighted_200_dummy" = "Log GDP X Top 200 Articles",
+                              "log_gdp:weighted_100_dummy" = "Log GDP X Top 100 Articles",
+                              "log_gdp:weighted_citation_dummy" = "Log GDP X Citation Count of Articles Using Data", 
+                              "log_gdp:weighted_500_dummy" = "Log GDP X Top 500 Articles",
                               "weighted_200_dummy:log_gdp" = "Log GDP X Top 200 Articles",
                               "weighted_100_dummy:log_gdp" = "Log GDP X Top 100 Articles",
-                              "weighted_citation_dummy:log_gdp" = "Log GDP X Citation Count of Articles Using Data", 
-                              # "weighted_500_dummy" = "Top 500 Articles",
+                              "weighted_citation_dummy:log_gdp" = "Log GDP X Citation Count of Articles Using Data",                              # "weighted_500_dummy" = "Top 500 Articles",
                               # "weighted_200_dummy" = "Top 200 Articles",
                               # "weighted_100_dummy" = "Top 100 Articles",
                               # "weighted_citation_dummy" = "Citation Count of Articles Using Data",
                              "log(qual_papers + 1)" = "Log Qualitative Papers",
                              "region"="Region",
+                             'log(NY.GDP.PCAP.PP.KD):impact_quintiles' = 'Log GDP per capita X Impact Factor',
                              "SPI.INDEX" = "SPI Overall Score",
                              "SPI.INDEX.PIL1" = "SPI Data Use Score",
                              "SPI.INDEX.PIL2" = "SPI Data Services Score",
                              "SPI.INDEX.PIL3" = "SPI Data Products Score",
                              "SPI.INDEX.PIL4" = "SPI Data Sources Score",
                              "SPI.INDEX.PIL5" = "SPI Data Infrastructure Score",
+
                              "log(poverty_surveys)" = 'Log # of Poverty Surveys',
                              "SG.LAW.INDX" = "Women Business and the Law Index Score (scale 1-100)",
                              "gii"="Gender Inequality Index",
@@ -1452,16 +1474,16 @@ reg_df_fixedn <- reg_df_fixedn %>%
   )
 
 source_models <- list(
-  '(1)'=lm_robust(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + Pop.Cen   , data=reg_df_fixedn),
-  '(2)'=lm_robust(log(data_papers) ~ Ag.Cen + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
-  '(3)'=lm_robust(log(data_papers) ~ Bizz.Cen +  log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
-  '(4)'=lm_robust(log(data_papers) ~  House.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) , data=reg_df_fixedn),
-  '(5)'=lm_robust(log(data_papers) ~  Ag.Svy + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
-  '(6)'=lm_robust(log(data_papers) ~  Labr.Svy + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
-  '(7)'=lm_robust(log(data_papers) ~ Hlth.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
-  '(8)'=lm_robust(log(data_papers) ~  Bizz.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
-  '(9)'=lm_robust(log(data_papers) ~  CRVS  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn),
-  '(10)'=lm_robust(log(data_papers) ~ SPI.D4.3.GEO.first.admin.level + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1), data=reg_df_fixedn) 
+  '(1)'=lm_robust(log(data_papers) ~ log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + Pop.Cen  + official_language  , data=reg_df_fixedn),
+  '(2)'=lm_robust(log(data_papers) ~ Ag.Cen + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language, data=reg_df_fixedn),
+  '(3)'=lm_robust(log(data_papers) ~ Bizz.Cen +  log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language, data=reg_df_fixedn),
+  '(4)'=lm_robust(log(data_papers) ~  House.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language , data=reg_df_fixedn),
+  '(5)'=lm_robust(log(data_papers) ~  Ag.Svy + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language, data=reg_df_fixedn),
+  '(6)'=lm_robust(log(data_papers) ~  Labr.Svy + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language, data=reg_df_fixedn),
+  '(7)'=lm_robust(log(data_papers) ~ Hlth.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language, data=reg_df_fixedn),
+  '(8)'=lm_robust(log(data_papers) ~  Bizz.Svy  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language, data=reg_df_fixedn),
+  '(9)'=lm_robust(log(data_papers) ~  CRVS  + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language, data=reg_df_fixedn),
+  '(10)'=lm_robust(log(data_papers) ~ SPI.D4.3.GEO.first.admin.level + log(NY.GDP.PCAP.PP.KD) + log(SP.POP.TOTL) + log(qual_papers+1) + official_language, data=reg_df_fixedn) 
   )
 
 
@@ -1622,22 +1644,22 @@ df_plot <- country_scores_annual_df %>%
   filter(SP.POP.TOTL>10^6) %>%
   select(iso3c, date, region, income_level, data_papers_3yr, SPI.INDEX.PIL4.5_3yr,SP.POP.TOTL,NY.GDP.PCAP.PP.KD,
          SPI.INDEX.PIL2_3yr,SPI.INDEX.PIL4_3yr,SPI.INDEX.PIL5_3yr,SPI.INDEX.PIL2,SPI.INDEX.PIL4,SPI.INDEX.PIL5,
-         NY.GDP.PCAP.PP.KD_3yr, SP.POP.TOTL_3yr,qual_papers_3yr,data_papers_pcap_3yr)
+         NY.GDP.PCAP.PP.KD_3yr, SP.POP.TOTL_3yr,qual_papers_3yr,data_papers_pcap_3yr, official_language)
 
 
 # Log data papers population and GDPpc regression adjusted
-mod <- fixest::feols(log(data_papers_3yr)~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr),  data=df_plot)
+mod <- fixest::feols(log(data_papers_3yr)~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr)  + official_language,  data=df_plot)
 df_plot <- df_plot %>%
   modelr::add_residuals(mod, var='data_use_reg_adjusted_3yr') 
 
 # Log data papers population and GDPpc AND QUALITATIVE PAPERS regression adjusted
 df_plot$qual_papers_3yr_plus1 <- df_plot$qual_papers_3yr + 1 
-mod <- fixest::feols(log(data_papers_3yr)~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr) + log(qual_papers_3yr_plus1),  data=df_plot)
+mod <- fixest::feols(log(data_papers_3yr)~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr) + log(qual_papers_3yr_plus1) + official_language,  data=df_plot)
 df_plot <- df_plot %>%
   modelr::add_residuals(mod, var='data_use_reg_adjusted_3yr_v2') 
 
 #adjust spi pillar 4 for log qualitative papers
-mod <- fixest::feols(SPI.INDEX.PIL4_3yr~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr) + log(qual_papers_3yr_plus1),  data=df_plot)
+mod <- fixest::feols(SPI.INDEX.PIL4_3yr~  log(SP.POP.TOTL_3yr) + log(NY.GDP.PCAP.PP.KD_3yr) + log(qual_papers_3yr_plus1) + official_language,  data=df_plot)
 df_plot <- df_plot %>%
   modelr::add_residuals(mod, var='SPI.INDEX.PIL4_3yr_reg_adjusted_3yr_v2') 
   
@@ -1677,10 +1699,18 @@ ggplot(df_plot, aes(x = SPI.INDEX.PIL4_3yr, y = data_use_reg_adjusted_3yr_v2)) +
   geom_text_repel(aes(label = iso3c)) +
   geom_vline(xintercept = median_x, linetype="dashed", color = "red") +
   geom_hline(yintercept = median_y_v2, linetype="dashed", color = "red") +
-  geom_richtext(aes(x = min_x, y = min_y_v2, label = "<b>Deserts: <br>low data supply, <br>little data research</b>"), fill = "lightblue", alpha = 0.8) +  
-  geom_richtext(aes(x = max_x, y = (max_y_v2+0.1), label = "<b>Lakes: <br>high data supply, <br>high data research</b>"), fill = "lightblue", alpha = 0.8) +  
-  geom_richtext(aes(x = max_x, y = min_y_v2, label = "<b>Swamps: <br>high data supply, <br>little data research</b>"), fill = "lightblue", alpha = 0.8) +  
-  geom_richtext(aes(x = min_x, y = (max_y_v2+0.1), label = "<b>Oases: <br>low data supply, <br>high data research</b>"), fill = "lightblue", alpha = 0.8) +
+  geom_richtext(
+    data=data.frame(x=c(min_x, max_x), y=c(max_y_v2, min_y_v2)),
+    aes(x = min_x, y = min_y_v2, label = "<b>Deserts: <br>low data supply, <br>little data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(
+    data=data.frame(x=c(min_x, max_x), y=c(max_y_v2, min_y_v2)),
+    aes(x = max_x, y = (max_y_v2+0.1), label = "<b>Lakes: <br>high data supply, <br>high data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(
+    data=data.frame(x=c(min_x, max_x), y=c(max_y_v2, min_y_v2)),
+    aes(x = max_x, y = min_y_v2, label = "<b>Swamps: <br>high data supply, <br>little data research</b>"), fill = "lightblue", alpha = 0.8) +  
+  geom_richtext(
+    data=data.frame(x=c(min_x, max_x), y=c(max_y_v2, min_y_v2)),
+    aes(x = min_x, y = (max_y_v2+0.1), label = "<b>Oases: <br>low data supply, <br>high data research</b>"), fill = "lightblue", alpha = 0.8) +
   scale_x_continuous(expand = expansion(mult = c(0.2, .2))) +
   scale_y_continuous(expand = expansion(mult = c(0.2, 0.2))) +
   labs(y = "Regression adjusted # papers using data (avg. 2017-2019)", 
