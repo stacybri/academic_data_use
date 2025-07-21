@@ -9,11 +9,11 @@
 
 # Academic Data Use
 
- Reproducibility package for "Missing Evidence:  Tracking Academic Data Use around the World"
+ Reproducibility package for ["Data use in social science and medical articles around the world"](https://academic.oup.com/pnasnexus/article/4/6/pgaf196/8169434)
 
 ## Overview  
 
-The code in this replication packages constructs the analysis files and tables and figures for Stacy, Kitzmüller, Wang, Mahler, and Serajuddin (2023) using R.  One main file runs all of the code to generate the data and figures.  The file is located in 02_programs/Data_Use_Academia_tables_figures.Rmd.  The replicator should expect the code to run for around 20-30 minutes. 
+The code in this replication packages constructs the analysis files and tables and figures for Stacy, Kitzmüller, Wang, Mahler, and Serajuddin (2025) using R.  One main file runs all of the code to generate the data and figures.  The file is located in 02_programs/Data_Use_Academia_tables_figures.Rmd.  The replicator should expect the code to run for around 20-30 minutes. 
 
 ## Directory Structure
 
