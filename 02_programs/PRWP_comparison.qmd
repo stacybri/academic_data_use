@@ -1,0 +1,8 @@
+---
+title: "Does the World Bank Policy Research Working Paper Series Help Fix the Skew in Academic Research Around the World?"
+format: docx
+execute:
+    echo: false
+    warning: false
+---
+
